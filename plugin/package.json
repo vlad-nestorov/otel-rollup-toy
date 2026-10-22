@@ -1,22 +1,10 @@
 {
   "name": "rollup-plugin-otel",
   "version": "0.1.0",
-  "description": "Adds OpenTelemetry auto-instrumentation to an ESM Rollup build without changes to app source",
+  "description": "Rollup side of adding OpenTelemetry to an ESM build: entry bootstrap, import-in-the-middle runtime files, CommonJS shim bundling",
   "type": "module",
   "exports": "./index.js",
   "peerDependencies": {
     "rollup": "^4.0.0"
-  },
-  "dependencies": {
-    "@opentelemetry/api": "^1.9.0",
-    "@opentelemetry/context-async-hooks": "^3.0.0",
-    "@opentelemetry/core": "^3.0.0",
-    "@opentelemetry/exporter-trace-otlp-http": "^0.300.0",
-    "@opentelemetry/instrumentation": "^0.300.0",
-    "@opentelemetry/instrumentation-http": "^0.300.0",
-    "@opentelemetry/instrumentation-undici": "^0.34.0",
-    "@opentelemetry/resources": "^3.0.0",
-    "@opentelemetry/sdk-trace": "^3.0.0",
-    "import-in-the-middle": "^3.5.0"
   }
 }

@@ -7,6 +7,9 @@
     "build:control": "rollup -c rollup.config.control.js",
     "verify": "node scripts/verify.mjs"
   },
+  "dependencies": {
+    "otel-sdk-init": "*"
+  },
   "devDependencies": {
     "@rollup/plugin-commonjs": "^29.0.3",
     "@rollup/plugin-node-resolve": "^16.0.3",

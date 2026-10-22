@@ -4,6 +4,7 @@
   "type": "module",
   "workspaces": [
     "plugin",
+    "sdk",
     "app"
   ],
   "scripts": {

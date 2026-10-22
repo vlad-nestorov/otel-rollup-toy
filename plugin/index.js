@@ -1,42 +1,29 @@
 // rollup-plugin-otel
 //
-// Adds OpenTelemetry auto-instrumentation to an ESM Rollup build. The app's source
-// stays untouched: the plugin swaps the entry for a generated bootstrap that
-//   1. registers import-in-the-middle's loader hooks (in-thread sync hooks when the
-//      Node version supports them, otherwise the off-thread hook file it emits),
-//   2. starts the OTel SDK and instrumentations,
-//   3. loads the real entry with a dynamic import(), so the app's module graph is
+// The Rollup half of adding OpenTelemetry to an ESM build without touching app source.
+// The plugin swaps the entry for a generated bootstrap that
+//   1. imports the SDK package (otel-sdk-init by default) and calls its start(), passing
+//      the URL of the loader-hook file this plugin emits,
+//   2. loads the real entry with a dynamic import(), so the app's module graph is
 //      resolved only after the hooks exist (the same effect as `node --import`).
+// Everything about what gets instrumented and where spans go lives in the SDK package.
+// This plugin only deals with bundling: the entry swap, the files import-in-the-middle
+// needs at runtime, CommonJS require shims, and output options.
 
 import { realpathSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { builtinModules, createRequire } from 'node:module'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 
-const PLUGIN_FILE = fileURLToPath(import.meta.url)
 const ENTRY_SUFFIX = '?otel-entry'
 const INIT_ID = '\0otel-init'
 
-const INSTRUMENTATIONS = {
-  http: {
-    pkg: '@opentelemetry/instrumentation-http',
-    exportName: 'HttpInstrumentation',
-    // Modules the ESM loader hook has to wrap so this instrumentation can patch them.
-    modules: ['http', 'https'],
-  },
-  undici: {
-    pkg: '@opentelemetry/instrumentation-undici',
-    exportName: 'UndiciInstrumentation',
-    // Subscribes to undici's diagnostics channels by name: needs no loader hook.
-    modules: [],
-  },
-}
-
 export default function otel(options = {}) {
   const {
-    serviceName = 'unknown_service',
-    instrumentations = Object.keys(INSTRUMENTATIONS),
+    // The package whose start() initializes OpenTelemetry, resolved from the project.
+    sdk = 'otel-sdk-init',
+    // Passed to start(). Must be JSON-serializable: it's written into the bundle.
+    sdkOptions = {},
     hookFileName = 'otel-hook.mjs',
     registerFileName = 'otel-iitm-register.mjs',
     // Runtime requires known to be optional (wrapped in try/catch by their callers),
@@ -44,130 +31,51 @@ export default function otel(options = {}) {
     optionalRequires = ['supports-color'],
   } = options
 
-  for (const name of instrumentations) {
-    if (!INSTRUMENTATIONS[name]) {
-      throw new Error(`[otel] unknown instrumentation "${name}"`)
-    }
-  }
-
   let ids
   let hookRef
   let registerRef
-
-  // Resolve a dependency of this plugin from the plugin's own location, so it works
-  // even when the app can't see the plugin's dependencies (pnpm, linked packages).
-  async function resolveFrom(ctx, source, importer = PLUGIN_FILE) {
-    const resolved = await ctx.resolve(source, importer, { skipSelf: true })
-    if (!resolved || resolved.external) {
-      ctx.error(`[otel] could not resolve "${source}" from ${importer}`)
-    }
-    return resolved.id
-  }
 
   function isOwnChunk(id) {
     return ids !== undefined && (id === ids.iitmHook || id === ids.iitmRegister)
   }
 
   function initModule() {
-    const j = JSON.stringify
-    const include = [...new Set(instrumentations.flatMap((n) => INSTRUMENTATIONS[n].modules))]
-
-    return [
-      `import { register as registerAsyncHooks } from 'node:module'`,
-      `import { register as registerSyncHooks, supportsSyncHooks } from ${j(ids.iitmRegisterHooks)}`,
-      `import { context, diag, DiagConsoleLogger, DiagLogLevel, propagation, trace } from ${j(ids.api)}`,
-      `import { CompositePropagator, W3CBaggagePropagator, W3CTraceContextPropagator } from ${j(ids.core)}`,
-      `import { AsyncLocalStorageContextManager } from ${j(ids.contextAsyncHooks)}`,
-      `import { BatchSpanProcessor, TracerProvider } from ${j(ids.sdkTrace)}`,
-      `import { resourceFromAttributes } from ${j(ids.resources)}`,
-      `import { OTLPTraceExporter } from ${j(ids.exporter)}`,
-      `import { registerInstrumentations } from ${j(ids.instrumentation)}`,
-      ...instrumentations.map(
-        (n) => `import { ${INSTRUMENTATIONS[n].exportName} } from ${j(ids.instrumentations[n])}`,
-      ),
-      ``,
-      `// 1. Loader hooks, before the app's module graph is loaded.`,
-      `const include = ${j(include)}`,
-      `const requested = process.env.OTEL_ROLLUP_HOOKS`,
-      `const mode = include.length === 0 ? 'none'`,
-      `  : requested === 'sync' || requested === 'async' ? requested`,
-      `  : supportsSyncHooks() ? 'sync' : 'async'`,
-      `if (mode === 'sync') {`,
-      `  registerSyncHooks({ include })`,
-      `} else if (mode === 'async') {`,
-      `  registerAsyncHooks(import.meta.ROLLUP_FILE_URL_${hookRef}, { data: { include } })`,
-      `}`,
-      ``,
-      `// 2. SDK. OTEL_LOG_LEVEL (or the debug flag) turns on OTel's own diagnostic logging.`,
-      `const logLevel = (process.env.OTEL_LOG_LEVEL || (process.env.OTEL_ROLLUP_DEBUG ? 'info' : '')).toUpperCase()`,
-      `if (logLevel && DiagLogLevel[logLevel] !== undefined) diag.setLogger(new DiagConsoleLogger(), DiagLogLevel[logLevel])`,
-      `const endpoint = (process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'http://localhost:4318').replace(/\\/+$/, '')`,
-      `const provider = new TracerProvider({`,
-      `  resource: resourceFromAttributes({ 'service.name': process.env.OTEL_SERVICE_NAME || ${j(serviceName)} }),`,
-      `  spanProcessors: [`,
-      `    new BatchSpanProcessor({`,
-      `      exporter: new OTLPTraceExporter({`,
-      `        url: process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT || endpoint + '/v1/traces',`,
-      `      }),`,
-      `    }),`,
-      `  ],`,
-      `})`,
-      `trace.setGlobalTracerProvider(provider)`,
-      `context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable())`,
-      `propagation.setGlobalPropagator(new CompositePropagator({`,
-      `  propagators: [new W3CTraceContextPropagator(), new W3CBaggagePropagator()],`,
-      `}))`,
-      ``,
-      `// 3. Instrumentations. Their import-in-the-middle Hook()s receive each wrapped module.`,
-      `registerInstrumentations({`,
-      `  instrumentations: [${instrumentations.map((n) => `new ${INSTRUMENTATIONS[n].exportName}()`).join(', ')}],`,
-      `})`,
-      ``,
-      `// 4. Flush when the event loop drains. The app's run() is often not awaited,`,
-      `//    so the bootstrap can't simply wrap it.`,
-      `process.once('beforeExit', () => {`,
-      `  provider.shutdown().catch((err) => console.error('[otel] failed to flush spans:', err))`,
-      `})`,
-      ``,
-      `if (process.env.OTEL_ROLLUP_DEBUG) {`,
-      `  // In GitHub Actions, post the line as a notice annotation so it shows on the run page.`,
-      `  const prefix = process.env.GITHUB_ACTIONS === 'true' ? '::notice title=otel::' : ''`,
-      `  console.error(prefix + '[otel] hooks=' + mode + ' node=' + process.versions.node + ' endpoint=' + endpoint)`,
-      `}`,
-      ``,
-    ].join('\n')
+    const config = `Object.assign(${JSON.stringify(sdkOptions)}, { hookUrl: import.meta.ROLLUP_FILE_URL_${hookRef} })`
+    return `import { start } from ${JSON.stringify(ids.sdk)}\nstart(${config})\n`
   }
 
   return {
     name: 'otel',
 
-    async buildStart() {
-      // import-in-the-middle must be the copy @opentelemetry/instrumentation uses:
-      // the loader's wrappers report to its lib/register.js, which is where the
-      // instrumentations' Hook() registrations live. Locate it with Node's resolver,
-      // not this.resolve(): going through the plugin chain lets @rollup/plugin-commonjs
-      // load lib/register.js as CommonJS before load() below can serve it as ESM.
-      const requireFromPlugin = createRequire(PLUGIN_FILE)
-      const requireFromInstrumentation = createRequire(requireFromPlugin.resolve('@opentelemetry/instrumentation'))
-      const iitmDir = path.dirname(requireFromInstrumentation.resolve('import-in-the-middle/package.json'))
+    buildStart() {
+      // Locate everything with Node's resolver rather than this.resolve(): going through
+      // the plugin chain lets @rollup/plugin-commonjs load import-in-the-middle's
+      // lib/register.js as CommonJS before load() below can serve it as ESM.
+      const requireFromProject = createRequire(path.join(process.cwd(), 'package.json'))
+      let sdkFile
+      try {
+        sdkFile = realpathSync(requireFromProject.resolve(sdk))
+      } catch {
+        this.error(`[otel] could not resolve the SDK package "${sdk}" from ${process.cwd()}; is it installed?`)
+      }
+
+      // import-in-the-middle must be the copy the SDK's @opentelemetry/instrumentation
+      // uses: the loader's wrappers report to its lib/register.js, which is where the
+      // instrumentations' Hook() registrations live.
+      let iitmDir
+      try {
+        const requireFromInstrumentation = createRequire(createRequire(sdkFile).resolve('@opentelemetry/instrumentation'))
+        iitmDir = path.dirname(requireFromInstrumentation.resolve('import-in-the-middle/package.json'))
+      } catch {
+        this.error(`[otel] could not find import-in-the-middle through ${sdk}'s @opentelemetry/instrumentation`)
+      }
       const iitm = (file) => realpathSync(path.join(iitmDir, file))
 
       ids = {
+        sdk: sdkFile,
         iitmHook: iitm('hook.mjs'),
-        iitmRegisterHooks: iitm('register-hooks.mjs'),
         iitmCreateHook: iitm('create-hook.mjs'),
         iitmRegister: iitm('lib/register.js'),
-        instrumentations: {},
-      }
-      ids.instrumentation = await resolveFrom(this, '@opentelemetry/instrumentation')
-      ids.api = await resolveFrom(this, '@opentelemetry/api')
-      ids.core = await resolveFrom(this, '@opentelemetry/core')
-      ids.contextAsyncHooks = await resolveFrom(this, '@opentelemetry/context-async-hooks')
-      ids.sdkTrace = await resolveFrom(this, '@opentelemetry/sdk-trace')
-      ids.resources = await resolveFrom(this, '@opentelemetry/resources')
-      ids.exporter = await resolveFrom(this, '@opentelemetry/exporter-trace-otlp-http')
-      for (const name of instrumentations) {
-        ids.instrumentations[name] = await resolveFrom(this, INSTRUMENTATIONS[name].pkg)
       }
 
       // import-in-the-middle's registry. It gets its own file because the wrapper
@@ -181,7 +89,7 @@ export default function otel(options = {}) {
       })
 
       // The off-thread hook. module.register() needs a real file it can load in a
-      // fresh module graph on the hooks thread.
+      // fresh module graph on the hooks thread. Its URL is handed to start().
       hookRef = this.emitFile({
         type: 'chunk',
         id: ids.iitmHook,
@@ -289,7 +197,11 @@ export default function otel(options = {}) {
         seen.add(fileName)
         const chunk = bundle[fileName]
         if (!chunk || chunk.type !== 'chunk') return
-        if (chunk.moduleIds.includes(INIT_ID) || chunk.facadeModuleId?.endsWith(ENTRY_SUFFIX)) {
+        if (
+          chunk.moduleIds.includes(INIT_ID) ||
+          chunk.moduleIds.includes(ids.sdk) ||
+          chunk.facadeModuleId?.endsWith(ENTRY_SUFFIX)
+        ) {
           this.error(`[otel] ${hookFileName} would load the bootstrap on the hooks thread (via ${fileName})`)
         }
         chunk.imports.forEach(visit)

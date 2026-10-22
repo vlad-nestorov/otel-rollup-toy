@@ -10,6 +10,8 @@ export default {
   plugins: [
     nodeResolve({ exportConditions: ['node'], preferBuiltins: true }),
     commonjs(),
-    otel({ serviceName: 'toy-action' }),
+    // The plugin bundles otel-sdk-init (a dependency of this app) and calls its
+    // start() with these options before loading src/index.js.
+    otel({ sdkOptions: { serviceName: 'toy-action' } }),
   ],
 }

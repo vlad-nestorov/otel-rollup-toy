@@ -1,11 +1,12 @@
 # otel-rollup-toy
 
-A Rollup plugin that adds OpenTelemetry auto-instrumentation to an ESM build, plus a
-toy GitHub JavaScript action that uses it without any OTel code in its source.
+A Rollup plugin and an SDK package that add OpenTelemetry auto-instrumentation to an ESM
+build, plus a toy GitHub JavaScript action that uses them without any OTel code in its source.
 
 ```
-plugin/   rollup-plugin-otel: owns every OTel dependency
-app/      toy action: src/ has no OTel code, rollup.config.js just adds otel()
+plugin/   rollup-plugin-otel: the Rollup part only, no OpenTelemetry dependencies
+sdk/      otel-sdk-init: start() sets up loader hooks, the SDK, instrumentations and flushing
+app/      toy action: depends on otel-sdk-init; src/ has no OTel code; rollup.config.js adds otel()
 ```
 
 ## Run it
@@ -43,24 +44,38 @@ It prints a ✓/✗ line per check and exits non-zero on any failure.
   step checks the spans and `traceparent` headers the backend received. The action's log
   line `[otel] hooks=… node=…` shows which hook path the runner's Node version took.
 
-## What the plugin does
+## How the work is split
+
+`otel-sdk-init` owns everything about OpenTelemetry and doesn't know about Rollup. Its
+`start({ serviceName, instrumentations, hookUrl })`:
+
+- registers import-in-the-middle's loader hooks for the modules the chosen instrumentations
+  patch: in-thread `module.registerHooks()` on Node >= 22.22.3 or >= 24.11.1, otherwise
+  `module.register(hookUrl)` on a hooks thread
+- sets up the tracer provider, OTLP/HTTP exporter, context manager and propagators
+- registers the instrumentations (`http`, `undici`)
+- flushes spans on `beforeExit`
+
+`rollup-plugin-otel` only bundles. The app's config passes `sdkOptions`, which end up as
+the argument to `start()`:
+
+```js
+otel({ sdkOptions: { serviceName: 'toy-action' } })
+```
 
 | Rollup hook | Job |
 | --- | --- |
-| `buildStart` | Resolves OTel and import-in-the-middle from the plugin's own folder; emits `otel-hook.mjs`, `otel-iitm-register.mjs` and `package.json` |
+| `buildStart` | Resolves the SDK package (option `sdk`, default `otel-sdk-init`) from the project, and import-in-the-middle through the SDK's `@opentelemetry/instrumentation`; emits `otel-hook.mjs`, `otel-iitm-register.mjs` and `package.json` |
 | `resolveId` | Swaps each entry for `<real id>?otel-entry`, so the entry keeps its file name |
-| `load` | Generates the bootstrap (`import '\0otel-init'; await import(realEntry)`) and the init module (hooks, SDK, instrumentations, flush on `beforeExit`); serves iitm's CommonJS registry as ESM |
-| `transform` | Points iitm's loader at the emitted registry file; warns if a browser build of OTel was bundled |
+| `load` | Generates the bootstrap (`import '\0otel-init'; await import(realEntry)`) and the init module (`import { start } from 'otel-sdk-init'; start({ ...sdkOptions, hookUrl })`); serves import-in-the-middle's CommonJS registry as ESM |
+| `transform` | Points import-in-the-middle's loader at the emitted registry file; rewrites CommonJS `require` shims in `node_modules` into static imports; warns if a browser build of OTel was bundled |
 | `outputOptions` | Turns `output.file` into `output.dir` + the same entry file name |
-| `renderStart` / `generateBundle` | Fails the build on non-ESM output, `inlineDynamicImports`, or a hook file that would load the bootstrap |
+| `renderStart` / `generateBundle` | Fails the build on non-ESM output, `inlineDynamicImports`, or a hook file that would load the bootstrap or SDK; warns about runtime `require()`s left in the output |
 
-Hooks: on Node >= 22.22.3 or >= 24.11.1 the init module uses import-in-the-middle's
-in-thread `module.registerHooks()` path; on older versions it falls back to
-`module.register()` with the emitted `otel-hook.mjs`. Set `OTEL_ROLLUP_HOOKS=sync|async`
-to force one, and `OTEL_ROLLUP_DEBUG=1` to log which one ran.
-
-Runtime config: `OTEL_EXPORTER_OTLP_ENDPOINT` (default `http://localhost:4318`),
-`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_SERVICE_NAME`.
+Runtime settings, read by `otel-sdk-init`: `OTEL_EXPORTER_OTLP_ENDPOINT` (default
+`http://localhost:4318`), `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_SERVICE_NAME`,
+`OTEL_LOG_LEVEL`; `OTEL_ROLLUP_HOOKS=sync|async` forces a hook path and
+`OTEL_ROLLUP_DEBUG=1` logs which one ran.
 
 ## Status
 
