@@ -28,6 +28,8 @@ export function checkSpans({ spans, requests, exports = [] }, check, serviceName
   check('fetch exported a CLIENT span', Boolean(viaFetch), viaFetch?.scope ?? `${spans.length} spans received`)
   checkPropagation('http.get', viaHttp, requests, '/via-http', check)
   checkPropagation('fetch', viaFetch, requests, '/via-fetch', check)
+  const viaDataloader = spans.find((s) => s.name.startsWith('dataloader.load'))
+  check('dataloader.load exported a span', Boolean(viaDataloader), viaDataloader?.scope ?? `${spans.length} spans received`)
   check(
     `spans carry service.name=${serviceName}`,
     spans.length > 0 && spans.every((s) => s.resource['service.name'] === serviceName),

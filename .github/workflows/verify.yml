@@ -18,7 +18,8 @@ jobs:
 
   as-action:
     # Runs the built action the way GitHub runs any JavaScript action: the runner
-    # launches app/dist/index.js on its own bundled Node 24, with no node flags.
+    # launches dist/index.js of a deployed copy on its own bundled Node 24, with no
+    # node flags.
     name: Run as a GitHub action
     runs-on: ubuntu-latest
     steps:
@@ -29,8 +30,11 @@ jobs:
       - run: npm install --no-audit --no-fund
       - run: .github/scripts/annotate.sh 'npm run build' npm run build
 
-      - name: Remove node_modules so the action can only use what's in dist/
-        run: rm -rf node_modules app/node_modules plugin/node_modules
+      - name: Deploy the action like a release checkout (action.yml, dist/, and any shipped node_modules)
+        run: .github/scripts/annotate.sh 'deploy' node app/scripts/deploy.mjs deployed-action
+
+      - name: Remove the repo's node_modules so the action can only use what was deployed
+        run: rm -rf node_modules app/node_modules sdk/node_modules
 
       - name: Start the fake collector and target
         run: |
@@ -39,7 +43,7 @@ jobs:
             || { echo "fake backend did not start"; cat "$RUNNER_TEMP/backend.log"; exit 1; }
 
       - name: Run the toy action
-        uses: ./app
+        uses: ./deployed-action
         with:
           target-url: http://127.0.0.1:4318
         env:
@@ -53,7 +57,7 @@ jobs:
           env 'INPUT_TARGET-URL=http://127.0.0.1:4318'
           OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
           OTEL_ROLLUP_DEBUG=1
-          node app/dist/index.js
+          node deployed-action/dist/index.js
 
       - name: Check what the collector received
         run: .github/scripts/annotate.sh 'check-backend' node app/scripts/check-backend.mjs "$RUNNER_TEMP/backend.json"
@@ -64,6 +68,6 @@ jobs:
         with:
           name: as-action-debug
           path: |
-            app/dist
+            deployed-action/dist
             ${{ runner.temp }}/backend.json
             ${{ runner.temp }}/backend.log

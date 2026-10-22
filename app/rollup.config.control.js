@@ -1,4 +1,5 @@
-// Same build without the plugin, used by verify.mjs as a negative control.
+// The action without OpenTelemetry: src/index.js as the entry, everything bundled.
+// verify.mjs uses it as a negative control.
 import commonjs from '@rollup/plugin-commonjs'
 import { nodeResolve } from '@rollup/plugin-node-resolve'
 

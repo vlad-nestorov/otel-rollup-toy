@@ -8,12 +8,12 @@
     "verify": "node scripts/verify.mjs"
   },
   "dependencies": {
+    "dataloader": "^2.2.3",
     "otel-sdk-init": "*"
   },
   "devDependencies": {
     "@rollup/plugin-commonjs": "^29.0.3",
     "@rollup/plugin-node-resolve": "^16.0.3",
-    "rollup": "^4.65.0",
-    "rollup-plugin-otel": "*"
+    "rollup": "^4.65.0"
   }
 }
