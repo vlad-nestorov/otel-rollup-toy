@@ -29,6 +29,13 @@ jobs:
       - run: npm install --no-audit --no-fund
       - run: .github/scripts/annotate.sh 'npm run build' npm run build
 
+      - name: Diagnostics (temporary)
+        if: always()
+        run: |
+          .github/scripts/annotate.sh 'diag: forwarded-parse in OTel dist' bash -c 'grep -rn -B2 -A2 "forwarded-parse" node_modules/@opentelemetry/instrumentation-http/dist/ --include=*.mjs | cut -c1-220 | head -40'
+          .github/scripts/annotate.sh 'diag: require shims in OTel dist' bash -c 'grep -rnoE "(createRequire|__require|require\()[^;]{0,80}" node_modules/@opentelemetry/*/dist/*.mjs node_modules/@opentelemetry/*/dist/platform/node/*.mjs 2>/dev/null | cut -c1-200 | sort | uniq | head -60'
+          .github/scripts/annotate.sh 'diag: bundle requires' bash -c 'grep -rnoE ".{0,80}(forwarded-parse|require-in-the-middle|supports-color).{0,40}" app/dist/*.js | cut -c1-220 | head -30'
+
       - name: Remove node_modules so the action can only use what's in dist/
         run: rm -rf node_modules app/node_modules plugin/node_modules
 
