@@ -1,12 +1,13 @@
-// Builds the toy action with and without the plugin, runs each build from a folder
-// with no node_modules (like an action checkout on a runner) against a fake backend,
-// and checks what was exported and propagated.
+// Builds the toy action with and without OpenTelemetry, deploys each build to a temp
+// folder the way a runner checks out an action, runs it against a fake backend, and
+// checks what was exported and propagated.
 import { spawn, spawnSync } from 'node:child_process'
-import { cp, mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { checkSpans, createChecker } from './checks.mjs'
+import { deploy, SHIP_NODE_MODULES } from './deploy.mjs'
 import { startFakeBackend } from './fake-backend.mjs'
 
 const appDir = fileURLToPath(new URL('..', import.meta.url))
@@ -24,11 +25,10 @@ async function build(config, outDir) {
   return path.join(appDir, outDir)
 }
 
-async function isolate(distDir) {
+async function deployToTemp(distDir, options) {
   const root = await mkdtemp(path.join(tmpdir(), 'otel-toy-'))
   tempDirs.push(root)
-  await cp(distDir, path.join(root, 'dist'), { recursive: true })
-  return root
+  return deploy(path.join(root, 'action'), distDir, options)
 }
 
 async function runAction(root, env = {}) {
@@ -56,53 +56,41 @@ async function runAction(root, env = {}) {
 async function checkInstrumentedRun(title, root, env) {
   console.log(`\n${title}`)
   const run = await runAction(root, env)
-  const mode = /\[otel\] hooks=(\w+)/.exec(run.output)?.[1]
+  const hooks = /\[otel\] hooks=(\w+)/.exec(run.output)?.[1]
 
   console.log('      action output:')
   for (const line of run.output.trim().split('\n').slice(-25)) console.log(`        | ${line}`)
   check('action exited 0', run.code === 0)
-  check('bootstrap registered the loader hooks', Boolean(mode), mode ? `hooks=${mode}` : 'no [otel] line')
+  check('SDK started', Boolean(hooks), hooks ? `hooks=${hooks}` : 'no [otel] line')
   checkSpans(run, check)
-  return mode
+  return hooks
 }
 
 try {
-  console.log('Building with rollup-plugin-otel...')
+  console.log('Building with otel-sdk-init...')
   const dist = await build('rollup.config.js', 'dist')
 
   console.log('\nBuild output')
   const files = (await readdir(dist, { recursive: true })).sort()
   console.log(`      ${files.join(', ')}`)
-  for (const [file, role] of [
-    ['index.js', 'bootstrap entry'],
-    ['otel-hook.mjs', 'off-thread loader hook'],
-    ['otel-iitm-register.mjs', 'import-in-the-middle registry'],
-    ['package.json', 'type: module marker'],
-  ]) {
-    check(`${file} (${role})`, files.includes(file))
-  }
+  check('index.js (entry)', files.includes('index.js'))
   const entry = await readFile(path.join(dist, 'index.js'), 'utf8')
   check('entry loads the app with a dynamic import()', /\bimport\(/.test(entry))
   check('app code is not in the entry chunk', !entry.includes('via-http'))
 
-  const root = await isolate(dist)
-  const autoMode = await checkInstrumentedRun(
-    `Run 1: hooks picked automatically (Node ${process.versions.node}), from ${root}`,
-    root,
-  )
-  if (autoMode !== 'async') {
+  const root = await deployToTemp(dist)
+  console.log(`\nDeployed to ${root}${SHIP_NODE_MODULES ? ' with production node_modules' : ' (dist/ only)'}`)
+  const hooks = await checkInstrumentedRun(`Run 1: Node ${process.versions.node}`, root)
+  if (hooks === 'sync') {
     await checkInstrumentedRun('Run 2: forced off-thread hooks (OTEL_ROLLUP_HOOKS=async)', root, {
       OTEL_ROLLUP_HOOKS: 'async',
     })
-  } else {
-    console.log(
-      `\n  note: in-thread sync hooks need Node >= 22.22.3 or >= 24.11.1; ` +
-        `Node ${process.versions.node} used the off-thread hook file, so only that path was exercised`,
-    )
   }
 
-  console.log('\nControl: same app built without the plugin')
-  const controlRoot = await isolate(await build('rollup.config.control.js', 'dist-control'))
+  console.log('\nControl: same app built without OpenTelemetry')
+  const controlRoot = await deployToTemp(await build('rollup.config.control.js', 'dist-control'), {
+    shipNodeModules: false,
+  })
   const control = await runAction(controlRoot)
   check('action exited 0', control.code === 0, control.code === 0 ? '' : control.output.trim())
   check('no spans exported', control.spans.length === 0, `${control.spans.length} received`)
