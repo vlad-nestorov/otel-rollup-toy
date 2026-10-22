@@ -10,7 +10,7 @@
 
 import { realpathSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { createRequire } from 'node:module'
+import { builtinModules, createRequire } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -237,6 +237,8 @@ export default function otel(options = {}) {
               'Add exportConditions: ["node"] to nodeResolve() or instrumentation will be a no-op.',
           )
         }
+
+        if (id.includes('/node_modules/')) return inlineCreateRequireCalls(code)
         return null
       },
     },
@@ -259,6 +261,16 @@ export default function otel(options = {}) {
     },
 
     generateBundle(_, bundle) {
+      // Anything still loaded with a runtime require() isn't in the output, and an
+      // action has no node_modules to find it in.
+      const leftover = new Set()
+      for (const file of Object.values(bundle)) {
+        if (file.type === 'chunk') runtimeRequires(file.code).forEach((s) => leftover.add(s))
+      }
+      if (leftover.size > 0) {
+        this.warn(`[otel] these modules are still loaded with require() at runtime and are not bundled: ${[...leftover].join(', ')}`)
+      }
+
       // The hook file runs on the loader thread. If chunking ever made it import the
       // bootstrap, the SDK and the app would run there too. Fail the build instead.
       const seen = new Set()
@@ -275,6 +287,59 @@ export default function otel(options = {}) {
       visit(hookFileName)
     },
   }
+}
+
+// ESM builds made by tsdown/rolldown (OTel's among them) load CommonJS dependencies
+// through a createRequire(import.meta.url) shim, which Rollup can't follow. Turn each
+// shim call with a literal, non-builtin specifier into a static import so it gets
+// bundled. Builtins are left alone: they're always there at runtime.
+const SHIM_DECLARATION = /(?:var|let|const)\s+([\w$]+)\s*=\s*(?:\/\*[^*]*\*\/\s*)?createRequire\(\s*import\.meta\.url\s*\)/g
+
+function shimNames(code) {
+  return [...code.matchAll(SHIM_DECLARATION)].map((m) => m[1])
+}
+
+function isBuiltin(specifier) {
+  return specifier.startsWith('node:') || builtinModules.includes(specifier.split('/')[0])
+}
+
+function inlineCreateRequireCalls(code) {
+  const names = shimNames(code)
+  if (names.length === 0) return null
+
+  const imports = new Map()
+  let changed = code
+  for (const name of names) {
+    const call = new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}\\(\\s*(["'])([^"']+)\\1\\s*\\)`, 'g')
+    changed = changed.replace(call, (whole, _quote, specifier) => {
+      if (isBuiltin(specifier)) return whole
+      if (!imports.has(specifier)) imports.set(specifier, `__otel_cjs_${imports.size}`)
+      return `__otel_interop(${imports.get(specifier)})`
+    })
+  }
+  if (imports.size === 0) return null
+
+  const header = [
+    ...[...imports].map(([specifier, local]) => `import * as ${local} from ${JSON.stringify(specifier)};`),
+    // CommonJS modules come through as their module.exports on `default`.
+    'const __otel_interop = (m) => (m && m.default !== undefined ? m.default : m);',
+  ].join('\n')
+  if (changed.startsWith('#!')) {
+    const firstLineEnd = changed.indexOf('\n') + 1
+    return { code: `${changed.slice(0, firstLineEnd)}${header}\n${changed.slice(firstLineEnd)}`, map: null }
+  }
+  return { code: `${header}\n${changed}`, map: null }
+}
+
+function runtimeRequires(code) {
+  const found = new Set()
+  for (const name of ['require', ...shimNames(code)]) {
+    const call = new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}\\(\\s*(["'])([^"']+)\\1\\s*\\)`, 'g')
+    for (const m of code.matchAll(call)) {
+      if (!isBuiltin(m[2]) && !m[2].startsWith('.')) found.add(m[2])
+    }
+  }
+  return found
 }
 
 // import-in-the-middle's lib/register.js is CommonJS. Its generated wrappers import
