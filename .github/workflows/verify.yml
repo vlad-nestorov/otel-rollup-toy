@@ -28,25 +28,4 @@ jobs:
             echo "## @opentelemetry/api exports"; node -p "JSON.stringify(require(\"./node_modules/@opentelemetry/api/package.json\").exports)"
           '
       - name: Bundle each way and see what is left behind
-        run: |
-          .github/scripts/annotate.sh 'diag: bundle comparison' bash -c '
-            cd app
-            for cond in node "node require"; do
-              conds=$(echo $cond | sed "s/ /\",\"/g")
-              cat > /tmp/cfg.mjs <<CFG
-          import commonjs from "@rollup/plugin-commonjs"
-          import { nodeResolve } from "@rollup/plugin-node-resolve"
-          export default { input: "src/index.js", output: { file: "/tmp/out-${cond// /-}.js", format: "es", inlineDynamicImports: true },
-            plugins: [nodeResolve({ exportConditions: ["$conds"], preferBuiltins: true }), commonjs()] }
-          CFG
-              cp /tmp/cfg.mjs ./diag.config.mjs
-              npx --no-install rollup -c diag.config.mjs --silent >/dev/null 2>&1
-              f=/tmp/out-${cond// /-}.js
-              echo "### exportConditions: [$cond]  size=$(wc -c < $f) bytes"
-              echo "runtime createRequire shims left:"; grep -n "createRequire(import.meta.url)" $f | cut -c1-140
-              echo "calls through them:"; grep -noE "__require[0-9]*\(\"[^\"]+\"\)" $f | head
-              echo "forwarded-parse bundled: $(grep -c "function parse" $f) parse fn(s); copies of @opentelemetry/api: $(grep -c "opentelemetry.js.api" $f)"
-              mkdir -p /tmp/run && cp $f /tmp/run/index.mjs
-              echo "runs with no node_modules nearby:"; (cd /tmp/run && INPUT_TARGET-URL=http://127.0.0.1:1 timeout 10 node index.mjs 2>&1 | tail -2) || true
-            done
-          '
+        run: .github/scripts/annotate.sh 'diag: bundle comparison' node app/scripts/diag-bundles.mjs
