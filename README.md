@@ -1,112 +1,50 @@
-# otel-rollup-toy
+# otel-rollup-toy: option 1, keep dependencies external
 
-A Rollup plugin and an SDK package that add OpenTelemetry auto-instrumentation to an ESM
-build, plus a toy GitHub JavaScript action that uses them without any OTel code in its source.
+This branch shows `otel-sdk-init` used without a dedicated Rollup plugin, by keeping the
+instrumented libraries (and the SDK itself) out of the bundle. Compare with `main`,
+where `rollup-plugin-otel` makes the same SDK work with everything bundled, and with the
+`option-2-code-transformer` and `option-3-virtual-wrapper` branches.
 
 ```
-plugin/   rollup-plugin-otel: the Rollup part only, no OpenTelemetry dependencies
-sdk/      otel-sdk-init: start() sets up loader hooks, the SDK, instrumentations and flushing
-app/      toy action: depends on otel-sdk-init; src/ has no OTel code; rollup.config.js adds otel()
+sdk/   otel-sdk-init: start() registers import-in-the-middle's loader hooks, the SDK and
+       the stock OTel instrumentations for http, fetch (undici) and dataloader
+app/   toy action: src/main.js calls start() then imports src/index.js, which uses
+       node:http, fetch and dataloader
 ```
+
+## How it works
+
+- `app/rollup.config.js` marks every runtime dependency external (`otel-sdk-init`,
+  `dataloader`). The bundle holds only the app's own code and imports those packages
+  from `node_modules` at runtime.
+- `src/main.js` calls `start()` before importing the action, so the loader hooks exist
+  before Node loads `dataloader`. On Node >= 22.22.3 / >= 24.11.1 the hooks run in-thread;
+  otherwise `start()` registers import-in-the-middle's own `hook.mjs` from `node_modules`.
+- When the action imports `dataloader`, the hooks hand it to the stock
+  `@opentelemetry/instrumentation-dataloader`, which replaces its constructor and patches
+  its prototype. `node:http` goes through the same hooks to `@opentelemetry/instrumentation-http`;
+  fetch is covered by `@opentelemetry/instrumentation-undici` through diagnostics channels.
+
+## Trade-offs
+
+- No build-time instrumentation code at all: any stock OTel instrumentation works as-is.
+- The action must ship a production `node_modules` (for an action repo: commit it), which
+  gives up most of what bundling was for. `app/scripts/deploy.mjs` builds that layout.
+- Anything that ends up bundled is invisible to the hooks. Mark every instrumented library
+  external, including when another dependency is the one that imports it.
 
 ## Run it
-
-Needs Node 22 or later.
 
 ```sh
 npm install
 npm run verify
 ```
 
-`verify` builds the action, copies `dist/` to a temp folder with no `node_modules`
-(like an action checkout on a runner), runs it against a local fake collector, then:
+`verify` builds the action, deploys it to a temp folder with `action.yml`, `dist/` and a
+production `node_modules`, runs it against a local fake collector, and checks that
+`http.get`, `fetch` and `dataloader.load` exported spans, that each request's
+`traceparent` matches its span, and that a build without OpenTelemetry exports nothing.
+On Node versions with in-thread hooks it runs a second time with `OTEL_ROLLUP_HOOKS=async`.
 
-- checks the build output: `index.js` (bootstrap), `otel-hook.mjs` (loader hook),
-  `otel-iitm-register.mjs` (import-in-the-middle registry), `package.json` (type: module),
-  and that the app code is loaded with a dynamic `import()` rather than inlined in the entry
-- checks that `http.get` and `fetch` each exported a CLIENT span, that the `traceparent`
-  header the target received carries that span's trace and span IDs, and that spans
-  carry `service.name=toy-action`
-- runs a second time with `OTEL_ROLLUP_HOOKS=async` when the first run used in-thread hooks,
-  so both hook paths get exercised on Node versions that support sync hooks
-- builds and runs the same app without the plugin as a control: no spans, no traceparent
-
-It prints a ✓/✗ line per check and exits non-zero on any failure.
-
-## In CI
-
-`.github/workflows/verify.yml` runs two jobs on every push:
-
-- `verify`: `npm install && npm run verify` on Node 24
-- `as-action`: builds, deletes every `node_modules`, starts the fake backend, then runs the
-  built action with `uses: ./app`, so the runner itself launches `dist/index.js` on its
-  bundled Node 24 with no node flags, exactly as it would for a published action. A last
-  step checks the spans and `traceparent` headers the backend received. The action's log
-  line `[otel] hooks=… node=…` shows which hook path the runner's Node version took.
-
-## How the work is split
-
-`otel-sdk-init` owns everything about OpenTelemetry and doesn't know about Rollup. Its
-`start({ serviceName, instrumentations, hookUrl })`:
-
-- registers import-in-the-middle's loader hooks for the modules the chosen instrumentations
-  patch: in-thread `module.registerHooks()` on Node >= 22.22.3 or >= 24.11.1, otherwise
-  `module.register(hookUrl)` on a hooks thread
-- sets up the tracer provider, OTLP/HTTP exporter, context manager and propagators
-- registers the instrumentations (`http`, `undici`)
-- flushes spans on `beforeExit`
-
-`rollup-plugin-otel` only bundles. The app's config passes `sdkOptions`, which end up as
-the argument to `start()`:
-
-```js
-otel({ sdkOptions: { serviceName: 'toy-action' } })
-```
-
-| Rollup hook | Job |
-| --- | --- |
-| `buildStart` | Resolves the SDK package (option `sdk`, default `otel-sdk-init`) from the project, and import-in-the-middle through the SDK's `@opentelemetry/instrumentation`; emits `otel-hook.mjs`, `otel-iitm-register.mjs` and `package.json` |
-| `resolveId` | Swaps each entry for `<real id>?otel-entry`, so the entry keeps its file name |
-| `load` | Generates the bootstrap (`import '\0otel-init'; await import(realEntry)`) and the init module (`import { start } from 'otel-sdk-init'; start({ ...sdkOptions, hookUrl })`); serves import-in-the-middle's CommonJS registry as ESM |
-| `transform` | Points import-in-the-middle's loader at the emitted registry file; rewrites CommonJS `require` shims in `node_modules` into static imports; warns if a browser build of OTel was bundled |
-| `outputOptions` | Turns `output.file` into `output.dir` + the same entry file name |
-| `renderStart` / `generateBundle` | Fails the build on non-ESM output, `inlineDynamicImports`, or a hook file that would load the bootstrap or SDK; warns about runtime `require()`s left in the output |
-
-Runtime settings, read by `otel-sdk-init`: `OTEL_EXPORTER_OTLP_ENDPOINT` (default
-`http://localhost:4318`), `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_SERVICE_NAME`,
-`OTEL_LOG_LEVEL`; `OTEL_ROLLUP_HOOKS=sync|async` forces a hook path and
-`OTEL_ROLLUP_DEBUG=1` logs which one ran.
-
-## Status
-
-Verified in GitHub Actions against OpenTelemetry JS 3.0 (`@opentelemetry/sdk-trace`, which
-replaced `sdk-trace-node`), import-in-the-middle 3.5 and Rollup 4. Both jobs pass:
-
-- `verify` (Node 24.22): in-thread sync hooks and forced off-thread hooks both export the
-  `http.get` span (instrumentation-http) and the `fetch` span (instrumentation-undici),
-  each with a matching `traceparent`; the control build exports nothing
-- `as-action`: the runner's own Node 24.21 runs `dist/index.js` with no `node_modules`,
-  picks the sync hook path, and the collector receives both spans
-
-What it took to get there, in case you adapt the plugin:
-
-- Locate import-in-the-middle with Node's resolver. Going through `this.resolve()` let
-  `@rollup/plugin-commonjs` load its registry as CommonJS before the plugin could serve it
-  as ESM.
-- OTel's ESM builds load CommonJS dependencies (e.g. `forwarded-parse`) through a
-  rolldown `__require` shim imported from `_rolldown/runtime.mjs`. Rollup can't follow it,
-  so the plugin rewrites literal shim calls into static imports, and warns at build time
-  about any runtime `require()` of a non-builtin module left in the output
-  (`optionalRequires`, default `['supports-color']`, lists known-optional ones to ignore).
-- OTel 3.0 takes `new BatchSpanProcessor({ exporter })`, not the exporter as first argument.
-
-Remaining caveats:
-
-- The plugin depends on two details of import-in-the-middle's internals (how the loader
-  computes the registry URL, and the registry's `exports.x = x` lines); it fails the build
-  with a clear message if either changes.
-- The entry module's own exports are not re-exported by the bootstrap. That's fine for
-  actions and most apps; a library entry would need them generated from `this.load()`'s
-  export list.
-- `.github/scripts/annotate.sh` posts step output as annotations, so CI results are
-  readable through the checks API when raw job logs aren't reachable.
+CI (`.github/workflows/verify.yml`) runs `verify`, and also runs the deployed copy with
+`uses: ./deployed-action` so the GitHub runner launches it on its own Node 24.
