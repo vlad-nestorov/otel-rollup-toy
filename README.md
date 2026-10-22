@@ -23,7 +23,8 @@ npm run verify
 
 - checks the build output: `index.js` (bootstrap), `otel-hook.mjs` (loader hook),
   `otel-iitm-register.mjs` (import-in-the-middle registry), `package.json` (type: module),
-  and that the app code is loaded with a dynamic `import()` rather than inlined in the entry
+  that the app code is loaded with a dynamic `import()` rather than inlined in the entry,
+  and that no non-builtin module is left to `require()` at runtime
 - checks that `http.get` and `fetch` each exported a CLIENT span, that the `traceparent`
   header the target received carries that span's trace and span IDs, and that spans
   carry `service.name=toy-action`
@@ -77,6 +78,91 @@ Runtime settings, read by `otel-sdk-init`: `OTEL_EXPORTER_OTLP_ENDPOINT` (defaul
 `OTEL_LOG_LEVEL`; `OTEL_ROLLUP_HOOKS=sync|async` forces a hook path and
 `OTEL_ROLLUP_DEBUG=1` logs which one ran.
 
+## The createRequire shim
+
+One OTel dependency doesn't bundle on its own. The plugin's `transform` hook fixes it; the
+full explanation is also in `plugin/index.js` under "CommonJS dependencies loaded through
+a createRequire shim".
+
+**Where it comes from.** `@opentelemetry/instrumentation-http` imports the CommonJS
+package `forwarded-parse` with TypeScript's import-equals syntax:
+
+```ts
+import forwardedParse = require('forwarded-parse');
+```
+
+OTel builds with tsdown, which uses rolldown. For dependencies it doesn't bundle, rolldown
+keeps `require()` semantics in Node ESM output by building a real `require` with
+`createRequire`, instead of turning the call into an `import`. The published files
+(0.300.0) differ by format:
+
+```js
+// dist/_virtual/_rolldown/runtime.mjs
+import { createRequire } from "node:module";
+var __require = /* #__PURE__ */ (() => createRequire(import.meta.url))();
+export { __require };
+
+// dist/utils.mjs (ESM build)
+import { __require } from "./_virtual/_rolldown/runtime.mjs";
+const forwardedParse = __require("forwarded-parse");
+
+// dist/utils.cjs (CommonJS build)
+const forwardedParse = require("forwarded-parse");
+```
+
+**Why Rollup doesn't bundle it.** `@rollup/plugin-commonjs` rewrites the free `require` of
+CommonJS modules. In the ESM file `__require` is just a function imported from another
+module, so Rollup leaves the call in the output and `forwarded-parse` is never bundled.
+
+**What goes wrong.** After bundling, `import.meta.url` is the bundle's own URL, so the call
+resolves `forwarded-parse` starting from `dist/`. Run inside the repo, it finds the repo's
+`node_modules` and works by accident. Deployed without `node_modules`, the action crashes
+with "Cannot find module 'forwarded-parse'". (Checked in CI, both ways.)
+
+**What the plugin does.** In files under `node_modules`, every call through such a shim
+with a string-literal, non-builtin specifier becomes a static import:
+
+```js
+import * as __otel_cjs_0 from "forwarded-parse";
+const __otel_interop = (m) => (m && m.default !== undefined ? m.default : m);
+const forwardedParse = __otel_interop(__otel_cjs_0);
+```
+
+`@rollup/plugin-commonjs` exposes a CommonJS module's `module.exports` as its default
+export, which `__otel_interop` returns: the same value `require()` would have. The shim is
+then unused and tree-shaken away. It finds shims both when they're imported from rolldown's
+runtime module (as published) and when a file declares one itself.
+
+**Limits.**
+
+- Only string-literal specifiers. `generateBundle` warns about any runtime `require()` of a
+  non-builtin module still in the output, and `verify` fails on one.
+- Builtins (`node:http`, `fs`, ...) keep the runtime call; Node always has them.
+- It assumes the required module is CommonJS. `require()` of an ES module returns its
+  namespace, while the interop returns its default export when it has one.
+- The import runs when the importing module is evaluated, not at the call. For a
+  top-level import-equals, as in OTel, that's the same moment.
+
+**Alternatives, measured on this toy.**
+
+| Approach | Bundle | Runs without `node_modules` |
+| --- | --- | --- |
+| ESM builds, no transform | 312 KB | no: `forwarded-parse` is required at runtime |
+| ESM builds + this transform | about 312 KB plus `forwarded-parse` | yes |
+| `exportConditions: ['node', 'require']` (all CommonJS builds) | 1,018 KB | yes |
+| Only `instrumentation-http` aliased to its CommonJS build | 816 KB | yes |
+
+The CommonJS builds use plain `require()`, which `@rollup/plugin-commonjs` bundles, but
+CommonJS can't be tree-shaken: most of the extra size is
+`@opentelemetry/semantic-conventions` (285 KB) and `sdk-metrics` (145 KB), which the ESM
+build drops. Aliasing just one package still pulls the CommonJS copies of its own
+dependencies in next to the ESM ones.
+
+The fix belongs upstream: OTel could enable rolldown's
+[`esmExternalRequirePlugin`](https://rolldown.rs/builtin-plugins/esm-external-require) for
+`forwarded-parse`, or import it as a default import with `esModuleInterop` on. Either would
+make the ESM build bundle as is.
+
 ## Status
 
 Verified in GitHub Actions against OpenTelemetry JS 3.0 (`@opentelemetry/sdk-trace`, which
@@ -93,11 +179,10 @@ What it took to get there, in case you adapt the plugin:
 - Locate import-in-the-middle with Node's resolver. Going through `this.resolve()` let
   `@rollup/plugin-commonjs` load its registry as CommonJS before the plugin could serve it
   as ESM.
-- OTel's ESM builds load CommonJS dependencies (e.g. `forwarded-parse`) through a
-  rolldown `__require` shim imported from `_rolldown/runtime.mjs`. Rollup can't follow it,
-  so the plugin rewrites literal shim calls into static imports, and warns at build time
-  about any runtime `require()` of a non-builtin module left in the output
-  (`optionalRequires`, default `['supports-color']`, lists known-optional ones to ignore).
+- OTel's ESM builds load `forwarded-parse` through a rolldown `createRequire` shim that
+  Rollup can't follow; the plugin rewrites the call into a static import (see "The
+  createRequire shim" above). `optionalRequires`, default `['supports-color']`, lists
+  requires that are meant to fail quietly and stay out of the build warning.
 - OTel 3.0 takes `new BatchSpanProcessor({ exporter })`, not the exporter as first argument.
 
 Remaining caveats:

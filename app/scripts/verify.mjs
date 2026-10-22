@@ -2,11 +2,11 @@
 // with no node_modules (like an action checkout on a runner) against a fake backend,
 // and checks what was exported and propagated.
 import { spawn, spawnSync } from 'node:child_process'
-import { cp, mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
+import { cp, mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { checkSpans, createChecker } from './checks.mjs'
+import { checkSpans, createChecker, runtimeRequiresIn } from './checks.mjs'
 import { startFakeBackend } from './fake-backend.mjs'
 
 const appDir = fileURLToPath(new URL('..', import.meta.url))
@@ -73,6 +73,8 @@ try {
   console.log('\nBuild output')
   const files = (await readdir(dist, { recursive: true })).sort()
   console.log(`      ${files.join(', ')}`)
+  const sizes = await Promise.all(files.filter((f) => /\.m?js$/.test(f)).map((f) => stat(path.join(dist, f))))
+  console.log(`      JavaScript total: ${(sizes.reduce((sum, s) => sum + s.size, 0) / 1024).toFixed(0)} KB`)
   for (const [file, role] of [
     ['index.js', 'bootstrap entry'],
     ['otel-hook.mjs', 'off-thread loader hook'],
@@ -84,6 +86,10 @@ try {
   const entry = await readFile(path.join(dist, 'index.js'), 'utf8')
   check('entry loads the app with a dynamic import()', /\bimport\(/.test(entry))
   check('app code is not in the entry chunk', !entry.includes('via-http'))
+  // OTel's ESM builds load forwarded-parse through a createRequire shim, which the plugin
+  // rewrites into a static import (see "The createRequire shim" in the README).
+  const leftovers = await runtimeRequiresIn(dist)
+  check('no non-builtin module left to require() at runtime', leftovers.length === 0, leftovers.join(', '))
 
   const root = await isolate(dist)
   const autoMode = await checkInstrumentedRun(

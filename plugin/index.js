@@ -153,6 +153,8 @@ export default function otel(options = {}) {
           )
         }
 
+        // Bundle CommonJS dependencies that ESM builds load through a createRequire shim.
+        // See "CommonJS dependencies loaded through a createRequire shim" below.
         if (id.includes('/node_modules/')) return inlineCreateRequireCalls(code)
         return null
       },
@@ -177,7 +179,8 @@ export default function otel(options = {}) {
 
     generateBundle(_, bundle) {
       // Anything still loaded with a runtime require() isn't in the output, and an
-      // action has no node_modules to find it in.
+      // action has no node_modules to find it in. This catches shim calls the transform
+      // couldn't rewrite (computed specifiers) and plain requires left by commonjs().
       const leftover = new Set()
       for (const file of Object.values(bundle)) {
         if (file.type !== 'chunk') continue
@@ -211,17 +214,79 @@ export default function otel(options = {}) {
   }
 }
 
-// ESM builds made by tsdown/rolldown (OTel's among them) load CommonJS dependencies
-// through a createRequire(import.meta.url) shim, which Rollup can't follow. Turn each
-// shim call with a literal, non-builtin specifier into a static import so it gets
-// bundled. Builtins are left alone: they're always there at runtime.
-const SHIM_DECLARATION = /(?:var|let|const)\s+([\w$]+)\s*=\s*(?:\/\*[^*]*\*\/\s*)?createRequire\(\s*import\.meta\.url\s*\)/g
+// ---------------------------------------------------------------------------
+// CommonJS dependencies loaded through a createRequire shim
+// ---------------------------------------------------------------------------
+//
+// Where the shim comes from
+//   Some OTel packages import CommonJS modules with TypeScript's import-equals syntax.
+//   @opentelemetry/instrumentation-http's src/utils.ts has:
+//
+//     import forwardedParse = require('forwarded-parse');
+//
+//   OTel builds with tsdown, which uses rolldown. For a dependency it doesn't bundle,
+//   rolldown keeps require() semantics in Node ESM output, rather than turning the call
+//   into an import, by building a real require with createRequire. So the published
+//   ESM build (0.300.0) has:
+//
+//     // dist/_virtual/_rolldown/runtime.mjs
+//     import { createRequire } from "node:module";
+//     var __require = /* #__PURE__ */ (() => createRequire(import.meta.url))();
+//     export { __require };
+//
+//     // dist/utils.mjs
+//     import { __require } from "./_virtual/_rolldown/runtime.mjs";
+//     const forwardedParse = __require("forwarded-parse");
+//
+//   The CommonJS build, dist/utils.cjs, has a plain require("forwarded-parse").
+//
+// Why Rollup doesn't bundle it
+//   @rollup/plugin-commonjs only rewrites the free `require` of CommonJS modules. In the
+//   ESM file, __require is an ordinary function imported from another module, so the
+//   call stays in the output as is and forwarded-parse never makes it into the bundle.
+//
+// What goes wrong at runtime
+//   After bundling, import.meta.url is the bundle's own URL, so the call resolves
+//   forwarded-parse starting from dist/. Inside a repo it finds the repo's node_modules
+//   and works by accident; deployed without node_modules it throws "Cannot find module".
+//
+// The fix
+//   In files under node_modules, every call through such a shim whose argument is a
+//   string literal naming a non-builtin module becomes a static import, which Rollup
+//   resolves and bundles like any other:
+//
+//     import * as __otel_cjs_0 from "forwarded-parse";
+//     const __otel_interop = (m) => (m && m.default !== undefined ? m.default : m);
+//     const forwardedParse = __otel_interop(__otel_cjs_0);
+//
+//   @rollup/plugin-commonjs exposes a CommonJS module's module.exports as its default
+//   export, and __otel_interop returns that: the value require() would have returned.
+//   The shim is then unused, so Rollup drops it.
+//
+// Limits
+//   - Only string-literal specifiers. A computed __require(name) can't be resolved at
+//     build time; generateBundle warns about any runtime require left in the output.
+//   - Builtins (node:http, fs, ...) keep the runtime call: Node always has them.
+//   - Assumes the required module is CommonJS. require() of an ES module returns its
+//     namespace, whereas the interop returns its default export when it has one.
+//   - The import runs when the importing module is evaluated rather than at the call.
+//     For a top-level import-equals, as in OTel, that is the same moment.
+//
+// The alternative without a transform is nodeResolve({ exportConditions: ['node',
+// 'require'] }), which picks OTel's CommonJS builds. CommonJS can't be tree-shaken,
+// though: the toy action's bundle grows from about 312 KB to about 1,018 KB, mostly
+// @opentelemetry/semantic-conventions and sdk-metrics that the ESM build drops.
+
+// A local binding initialized with createRequire(import.meta.url), in any form,
+// including rolldown's `var __require = (() => createRequire(import.meta.url))()`.
+const SHIM_DECLARATION = /(?:var|let|const)\s+([\w$]+)\s*=[^;]*?createRequire\(\s*import\.meta\.url\s*\)/g
+// rolldown's usual layout: the shim lives in a shared runtime module and is imported,
+// possibly renamed: import { __require } from "./_virtual/_rolldown/runtime.mjs"
 const NAMED_IMPORT = /import\s*\{([^}]*)\}\s*from\s*["']([^"']+)["']/g
 
+// The local names that refer to a createRequire shim in this module.
 function shimNames(code) {
   const names = [...code.matchAll(SHIM_DECLARATION)].map((m) => m[1])
-  // rolldown usually declares the shim once in a shared runtime module and imports it:
-  //   import { __require } from "./_virtual/_rolldown/runtime.mjs"
   for (const [, specifiers, source] of code.matchAll(NAMED_IMPORT)) {
     if (!source.includes('rolldown/runtime')) continue
     for (const specifier of specifiers.split(',')) {
@@ -232,19 +297,24 @@ function shimNames(code) {
   return names
 }
 
+// Matches `name("specifier")` with a string literal, not `obj.name(...)` or `xname(...)`.
+function literalCalls(name) {
+  return new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}\\(\\s*(["'])([^"']+)\\1\\s*\\)`, 'g')
+}
+
 function isBuiltin(specifier) {
   return specifier.startsWith('node:') || builtinModules.includes(specifier.split('/')[0])
 }
 
+// The transform described above. Returns null when the module has nothing to rewrite.
 function inlineCreateRequireCalls(code) {
   const names = shimNames(code)
   if (names.length === 0) return null
 
-  const imports = new Map()
+  const imports = new Map() // specifier -> local namespace binding
   let changed = code
   for (const name of names) {
-    const call = new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}\\(\\s*(["'])([^"']+)\\1\\s*\\)`, 'g')
-    changed = changed.replace(call, (whole, _quote, specifier) => {
+    changed = changed.replace(literalCalls(name), (whole, _quote, specifier) => {
       if (isBuiltin(specifier)) return whole
       if (!imports.has(specifier)) imports.set(specifier, `__otel_cjs_${imports.size}`)
       return `__otel_interop(${imports.get(specifier)})`
@@ -254,9 +324,9 @@ function inlineCreateRequireCalls(code) {
 
   const header = [
     ...[...imports].map(([specifier, local]) => `import * as ${local} from ${JSON.stringify(specifier)};`),
-    // CommonJS modules come through as their module.exports on `default`.
     'const __otel_interop = (m) => (m && m.default !== undefined ? m.default : m);',
   ].join('\n')
+  // Imports are hoisted anyway; the header only has to come after a hashbang line.
   if (changed.startsWith('#!')) {
     const firstLineEnd = changed.indexOf('\n') + 1
     return { code: `${changed.slice(0, firstLineEnd)}${header}\n${changed.slice(firstLineEnd)}`, map: null }
@@ -264,13 +334,14 @@ function inlineCreateRequireCalls(code) {
   return { code: `${header}\n${changed}`, map: null }
 }
 
+// Specifiers of non-builtin modules a bundle chunk still loads with a runtime require,
+// through a plain `require` or a createRequire shim. Used for the build warning.
 function runtimeRequires(chunkCode) {
   const found = new Set()
   // Crude comment stripping: good enough for a warning, avoids flagging examples in docs.
   const code = chunkCode.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
   for (const name of new Set(['require', '__require', ...shimNames(code)])) {
-    const call = new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}\\(\\s*(["'])([^"']+)\\1\\s*\\)`, 'g')
-    for (const m of code.matchAll(call)) {
+    for (const m of code.matchAll(literalCalls(name))) {
       if (!isBuiltin(m[2]) && !m[2].startsWith('.')) found.add(m[2])
     }
   }
