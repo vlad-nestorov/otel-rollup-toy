@@ -1,9 +1,10 @@
-// otel-sdk-init
+// otel-sdk-init (option 1: runtime loader hooks)
 //
-// Starts OpenTelemetry tracing for a Node app or GitHub action. It doesn't know about
-// any bundler: whatever loads it before the app (rollup-plugin-otel, or node --import)
-// only has to call start() first and, for Node versions without in-thread module hooks,
-// pass hookUrl, the URL of a file exporting import-in-the-middle's loader hooks.
+// Starts OpenTelemetry tracing for a Node app or GitHub action. Instrumented libraries
+// are patched at runtime by the stock OTel instrumentations, which receive each module
+// from import-in-the-middle's loader hooks as it is imported. That only works for
+// modules Node actually loads from disk, so an app bundling its code must keep these
+// libraries, and this package, external and ship them in node_modules.
 
 import { register as registerAsyncHooks } from 'node:module'
 import { context, diag, DiagConsoleLogger, DiagLogLevel, propagation, trace } from '@opentelemetry/api'
@@ -11,6 +12,7 @@ import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-ho
 import { CompositePropagator, W3CBaggagePropagator, W3CTraceContextPropagator } from '@opentelemetry/core'
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http'
 import { registerInstrumentations } from '@opentelemetry/instrumentation'
+import { DataloaderInstrumentation } from '@opentelemetry/instrumentation-dataloader'
 import { HttpInstrumentation } from '@opentelemetry/instrumentation-http'
 import { UndiciInstrumentation } from '@opentelemetry/instrumentation-undici'
 import { resourceFromAttributes } from '@opentelemetry/resources'
@@ -28,6 +30,10 @@ const INSTRUMENTATIONS = {
     // Subscribes to undici's diagnostics channels by name: needs no loader hook.
     modules: [],
   },
+  dataloader: {
+    create: () => new DataloaderInstrumentation(),
+    modules: ['dataloader'],
+  },
 }
 
 let started
@@ -38,9 +44,11 @@ let started
  *
  * @param {object} [options]
  * @param {string} [options.serviceName] Used when OTEL_SERVICE_NAME isn't set.
- * @param {string[]} [options.instrumentations] Any of "http", "undici". Defaults to all.
+ * @param {string[]} [options.instrumentations] Any of "http", "undici", "dataloader".
+ *   Defaults to all.
  * @param {string | URL} [options.hookUrl] File exporting import-in-the-middle's loader
- *   hooks, for Node versions without module.registerHooks() support.
+ *   hooks, for Node versions without module.registerHooks() support. Defaults to
+ *   import-in-the-middle's own hook file in node_modules.
  */
 export function start({ serviceName = 'unknown_service', instrumentations = Object.keys(INSTRUMENTATIONS), hookUrl } = {}) {
   if (started) return started
@@ -104,12 +112,7 @@ function registerHooks(include, hookUrl) {
   if (mode === 'sync') {
     registerSyncHooks({ include })
   } else {
-    if (!hookUrl) {
-      throw new Error(
-        `[otel] Node ${process.versions.node} needs the off-thread loader hook, but start() got no hookUrl`,
-      )
-    }
-    registerAsyncHooks(hookUrl, { data: { include } })
+    registerAsyncHooks(hookUrl ?? import.meta.resolve('import-in-the-middle/hook.mjs'), { data: { include } })
   }
   return mode
 }

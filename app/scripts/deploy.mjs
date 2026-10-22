@@ -11,7 +11,7 @@ const appDir = fileURLToPath(new URL('..', import.meta.url))
 const repoRoot = path.dirname(appDir)
 
 // Does dist/ import the app's dependencies at runtime instead of bundling them?
-export const SHIP_NODE_MODULES = false
+export const SHIP_NODE_MODULES = true
 
 export async function deploy(outDir, distDir = path.join(appDir, 'dist'), { shipNodeModules = SHIP_NODE_MODULES } = {}) {
   await rm(outDir, { recursive: true, force: true })
