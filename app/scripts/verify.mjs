@@ -63,7 +63,11 @@ async function checkInstrumentedRun(title, root, env) {
   console.log('      action output:')
   for (const line of run.output.trim().split('\n').slice(-25)) console.log(`        | ${line}`)
   check('action exited 0', run.code === 0)
-  check('SDK started and patched the builtins', started === 'http,https', started ? `patched=${started}` : 'no [otel] line')
+  check(
+    'SDK started and patched node:http and node:https',
+    started?.split(',').sort().join(',') === 'http,https',
+    started ? `patched=${started}` : 'no [otel] line',
+  )
   checkSpans(run, check)
 }
 
