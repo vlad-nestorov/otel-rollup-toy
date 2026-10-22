@@ -121,7 +121,9 @@ export default function otel(options = {}) {
       `})`,
       ``,
       `if (process.env.OTEL_ROLLUP_DEBUG) {`,
-      `  console.error('[otel] hooks=' + mode + ' node=' + process.versions.node + ' endpoint=' + endpoint)`,
+      `  // In GitHub Actions, post the line as a notice annotation so it shows on the run page.`,
+      `  const prefix = process.env.GITHUB_ACTIONS === 'true' ? '::notice title=otel::' : ''`,
+      `  console.error(prefix + '[otel] hooks=' + mode + ' node=' + process.versions.node + ' endpoint=' + endpoint)`,
       `}`,
       ``,
     ].join('\n')

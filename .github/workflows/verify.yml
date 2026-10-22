@@ -14,7 +14,7 @@ jobs:
         with:
           node-version: 24
       - run: npm install --no-audit --no-fund
-      - run: npm run verify
+      - run: .github/scripts/annotate.sh 'npm run verify' npm run verify
 
   as-action:
     # Runs the built action the way GitHub runs any JavaScript action: the runner
@@ -27,7 +27,7 @@ jobs:
         with:
           node-version: 24
       - run: npm install --no-audit --no-fund
-      - run: npm run build
+      - run: .github/scripts/annotate.sh 'npm run build' npm run build
 
       - name: Remove node_modules so the action can only use what's in dist/
         run: rm -rf node_modules app/node_modules plugin/node_modules
@@ -46,12 +46,21 @@ jobs:
           OTEL_EXPORTER_OTLP_ENDPOINT: http://127.0.0.1:4318
           OTEL_ROLLUP_DEBUG: '1'
 
+      - name: If the action failed, rerun the build with plain node to capture its output
+        if: failure()
+        run: >-
+          .github/scripts/annotate.sh 'action output (plain node rerun)'
+          env 'INPUT_TARGET-URL=http://127.0.0.1:4318'
+          OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+          OTEL_ROLLUP_DEBUG=1
+          node app/dist/index.js
+
       - name: Check what the collector received
-        run: node app/scripts/check-backend.mjs "$RUNNER_TEMP/backend.json"
+        run: .github/scripts/annotate.sh 'check-backend' node app/scripts/check-backend.mjs "$RUNNER_TEMP/backend.json"
 
       - name: Upload the build and backend state
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: as-action-debug
           path: |
