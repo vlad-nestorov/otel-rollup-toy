@@ -12,6 +12,7 @@
     "otel-sdk-init": "*"
   },
   "devDependencies": {
+    "@apm-js-collab/code-transformer-bundler-plugins": "^0.7.4",
     "@rollup/plugin-commonjs": "^29.0.3",
     "@rollup/plugin-node-resolve": "^16.0.3",
     "rollup": "^4.65.0"

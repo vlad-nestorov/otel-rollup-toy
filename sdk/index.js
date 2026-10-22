@@ -1,59 +1,50 @@
-// otel-sdk-init
+// otel-sdk-init (option 2: build-time code transformer)
 //
-// Starts OpenTelemetry tracing for a Node app or GitHub action. It doesn't know about
-// any bundler: whatever loads it before the app (rollup-plugin-otel, or node --import)
-// only has to call start() first and, for Node versions without in-thread module hooks,
-// pass hookUrl, the URL of a file exporting import-in-the-middle's loader hooks.
+// Starts OpenTelemetry tracing for a Node app or GitHub action without patching any
+// module and without loader hooks. Instrumented libraries are rewritten at build time
+// by @apm-js-collab/code-transformer (configs in transforms.js) to publish
+// diagnostics_channel events; this package subscribes to them. node:http is covered by
+// Node's own http channels and fetch by undici's. So the whole SDK can be bundled, and
+// start() only has to run before the app makes its first call, not before it loads.
 
-import { register as registerAsyncHooks } from 'node:module'
 import { context, diag, DiagConsoleLogger, DiagLogLevel, propagation, trace } from '@opentelemetry/api'
 import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks'
 import { CompositePropagator, W3CBaggagePropagator, W3CTraceContextPropagator } from '@opentelemetry/core'
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http'
 import { registerInstrumentations } from '@opentelemetry/instrumentation'
-import { HttpInstrumentation } from '@opentelemetry/instrumentation-http'
 import { UndiciInstrumentation } from '@opentelemetry/instrumentation-undici'
 import { resourceFromAttributes } from '@opentelemetry/resources'
 import { BatchSpanProcessor, TracerProvider } from '@opentelemetry/sdk-trace'
-import { register as registerSyncHooks, supportsSyncHooks } from 'import-in-the-middle/register-hooks.mjs'
+import { instrumentDataloader, instrumentHttpClient } from './channels.js'
 
 const INSTRUMENTATIONS = {
-  http: {
-    create: () => new HttpInstrumentation(),
-    // Modules the ESM loader hook has to wrap so this instrumentation can patch them.
-    modules: ['http', 'https'],
-  },
-  undici: {
-    create: () => new UndiciInstrumentation(),
-    // Subscribes to undici's diagnostics channels by name: needs no loader hook.
-    modules: [],
-  },
+  // Node's built-in http.client.* channels.
+  http: () => instrumentHttpClient(),
+  // undici publishes its own channels; the stock OTel instrumentation subscribes to them.
+  undici: () => registerInstrumentations({ instrumentations: [new UndiciInstrumentation()] }),
+  // Channels injected into dataloader at build time (see transforms.js).
+  dataloader: () => instrumentDataloader(),
 }
 
 let started
 
 /**
- * Registers the loader hooks, starts the SDK and instrumentations, and flushes spans
- * when the event loop drains. Call it before the app's modules are loaded.
+ * Starts the SDK and subscribes the instrumentations. Call it before the app makes
+ * its first instrumented call.
  *
  * @param {object} [options]
  * @param {string} [options.serviceName] Used when OTEL_SERVICE_NAME isn't set.
- * @param {string[]} [options.instrumentations] Any of "http", "undici". Defaults to all.
- * @param {string | URL} [options.hookUrl] File exporting import-in-the-middle's loader
- *   hooks, for Node versions without module.registerHooks() support.
+ * @param {string[]} [options.instrumentations] Any of "http", "undici", "dataloader".
+ *   Defaults to all.
  */
-export function start({ serviceName = 'unknown_service', instrumentations = Object.keys(INSTRUMENTATIONS), hookUrl } = {}) {
+export function start({ serviceName = 'unknown_service', instrumentations = Object.keys(INSTRUMENTATIONS) } = {}) {
   if (started) return started
 
   for (const name of instrumentations) {
     if (!INSTRUMENTATIONS[name]) throw new Error(`[otel] unknown instrumentation "${name}"`)
   }
 
-  // 1. Loader hooks, before the app's module graph is loaded.
-  const include = [...new Set(instrumentations.flatMap((n) => INSTRUMENTATIONS[n].modules))]
-  const hooks = registerHooks(include, hookUrl)
-
-  // 2. SDK. OTEL_LOG_LEVEL (or the debug flag) turns on OTel's own diagnostic logging.
+  // OTEL_LOG_LEVEL (or the debug flag) turns on OTel's own diagnostic logging.
   const logLevel = (process.env.OTEL_LOG_LEVEL || (process.env.OTEL_ROLLUP_DEBUG ? 'info' : '')).toUpperCase()
   if (logLevel && DiagLogLevel[logLevel] !== undefined) {
     diag.setLogger(new DiagConsoleLogger(), DiagLogLevel[logLevel])
@@ -76,11 +67,10 @@ export function start({ serviceName = 'unknown_service', instrumentations = Obje
     new CompositePropagator({ propagators: [new W3CTraceContextPropagator(), new W3CBaggagePropagator()] }),
   )
 
-  // 3. Instrumentations. Their import-in-the-middle Hook()s receive each wrapped module.
-  registerInstrumentations({ instrumentations: instrumentations.map((n) => INSTRUMENTATIONS[n].create()) })
+  for (const name of instrumentations) INSTRUMENTATIONS[name]()
 
-  // 4. Flush when the event loop drains. An action's run() is often not awaited, so
-  //    the caller can't simply wrap it.
+  // Flush when the event loop drains. An action's run() is often not awaited, so the
+  // caller can't simply wrap it.
   process.once('beforeExit', () => {
     provider.shutdown().catch((err) => console.error('[otel] failed to flush spans:', err))
   })
@@ -88,28 +78,9 @@ export function start({ serviceName = 'unknown_service', instrumentations = Obje
   if (process.env.OTEL_ROLLUP_DEBUG) {
     // In GitHub Actions, post the line as a notice annotation so it shows on the run page.
     const prefix = process.env.GITHUB_ACTIONS === 'true' ? '::notice title=otel::' : ''
-    console.error(`${prefix}[otel] hooks=${hooks} node=${process.versions.node} endpoint=${endpoint}`)
+    console.error(`${prefix}[otel] hooks=none node=${process.versions.node} endpoint=${endpoint}`)
   }
 
-  started = { provider, hooks, shutdown: () => provider.shutdown() }
+  started = { provider, shutdown: () => provider.shutdown() }
   return started
-}
-
-function registerHooks(include, hookUrl) {
-  if (include.length === 0) return 'none'
-
-  const requested = process.env.OTEL_ROLLUP_HOOKS
-  const mode = requested === 'sync' || requested === 'async' ? requested : supportsSyncHooks() ? 'sync' : 'async'
-
-  if (mode === 'sync') {
-    registerSyncHooks({ include })
-  } else {
-    if (!hookUrl) {
-      throw new Error(
-        `[otel] Node ${process.versions.node} needs the off-thread loader hook, but start() got no hookUrl`,
-      )
-    }
-    registerAsyncHooks(hookUrl, { data: { include } })
-  }
-  return mode
 }
