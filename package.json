@@ -1,0 +1,13 @@
+{
+  "name": "otel-rollup-toy",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "plugin",
+    "app"
+  ],
+  "scripts": {
+    "build": "npm run build -w app",
+    "verify": "npm run verify -w app"
+  }
+}
