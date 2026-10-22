@@ -5,8 +5,9 @@ on:
   workflow_dispatch:
 
 jobs:
-  verify:
-    name: Build and verify (npm run verify)
+  diagnose:
+    # Temporary: compare what Rollup produces from OTel's ESM and CommonJS builds.
+    name: Diagnose the createRequire shim
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -14,56 +15,38 @@ jobs:
         with:
           node-version: 24
       - run: npm install --no-audit --no-fund
-      - run: .github/scripts/annotate.sh 'npm run verify' npm run verify
-
-  as-action:
-    # Runs the built action the way GitHub runs any JavaScript action: the runner
-    # launches app/dist/index.js on its own bundled Node 24, with no node flags.
-    name: Run as a GitHub action
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 24
-      - run: npm install --no-audit --no-fund
-      - run: .github/scripts/annotate.sh 'npm run build' npm run build
-
-      - name: Remove node_modules so the action can only use what's in dist/
-        run: rm -rf node_modules app/node_modules sdk/node_modules
-
-      - name: Start the fake collector and target
+      - name: Published ESM and CommonJS code for the forwarded-parse import
         run: |
-          node app/scripts/serve-fake-backend.mjs 4318 "$RUNNER_TEMP/backend.json" > "$RUNNER_TEMP/backend.log" 2>&1 &
-          timeout 10 bash -c 'until (echo > /dev/tcp/127.0.0.1/4318) 2>/dev/null; do sleep 0.1; done' \
-            || { echo "fake backend did not start"; cat "$RUNNER_TEMP/backend.log"; exit 1; }
-
-      - name: Run the toy action
-        uses: ./app
-        with:
-          target-url: http://127.0.0.1:4318
-        env:
-          OTEL_EXPORTER_OTLP_ENDPOINT: http://127.0.0.1:4318
-          OTEL_ROLLUP_DEBUG: '1'
-
-      - name: If the action failed, rerun the build with plain node to capture its output
-        if: failure()
-        run: >-
-          .github/scripts/annotate.sh 'action output (plain node rerun)'
-          env 'INPUT_TARGET-URL=http://127.0.0.1:4318'
-          OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
-          OTEL_ROLLUP_DEBUG=1
-          node app/dist/index.js
-
-      - name: Check what the collector received
-        run: .github/scripts/annotate.sh 'check-backend' node app/scripts/check-backend.mjs "$RUNNER_TEMP/backend.json"
-
-      - name: Upload the build and backend state
-        if: always()
-        uses: actions/upload-artifact@v5
-        with:
-          name: as-action-debug
-          path: |
-            app/dist
-            ${{ runner.temp }}/backend.json
-            ${{ runner.temp }}/backend.log
+          .github/scripts/annotate.sh 'diag: published files' bash -c '
+            d=node_modules/@opentelemetry/instrumentation-http
+            echo "## package exports"; node -p "JSON.stringify(require(\"./$d/package.json\").exports)"
+            echo "## dist/utils.mjs (ESM build)"; grep -n "forwarded-parse\|_rolldown/runtime" $d/dist/utils.mjs
+            echo "## dist/_virtual/_rolldown/runtime.mjs"; cat $d/dist/_virtual/_rolldown/runtime.mjs
+            echo "## dist/utils.cjs (CommonJS build)"; grep -n "forwarded-parse" $d/dist/utils.cjs
+            echo "## forwarded-parse"; node -p "const p=require(\"./node_modules/forwarded-parse/package.json\"); JSON.stringify({main:p.main,type:p.type,exports:p.exports})"
+            echo "## other @opentelemetry ESM files using __require"; grep -rln "__require(" node_modules/@opentelemetry/*/dist --include=*.mjs || true
+            echo "## @opentelemetry/api exports"; node -p "JSON.stringify(require(\"./node_modules/@opentelemetry/api/package.json\").exports)"
+          '
+      - name: Bundle each way and see what is left behind
+        run: |
+          .github/scripts/annotate.sh 'diag: bundle comparison' bash -c '
+            cd app
+            for cond in node "node require"; do
+              conds=$(echo $cond | sed "s/ /\",\"/g")
+              cat > /tmp/cfg.mjs <<CFG
+          import commonjs from "@rollup/plugin-commonjs"
+          import { nodeResolve } from "@rollup/plugin-node-resolve"
+          export default { input: "src/index.js", output: { file: "/tmp/out-${cond// /-}.js", format: "es", inlineDynamicImports: true },
+            plugins: [nodeResolve({ exportConditions: ["$conds"], preferBuiltins: true }), commonjs()] }
+          CFG
+              cp /tmp/cfg.mjs ./diag.config.mjs
+              npx --no-install rollup -c diag.config.mjs --silent >/dev/null 2>&1
+              f=/tmp/out-${cond// /-}.js
+              echo "### exportConditions: [$cond]  size=$(wc -c < $f) bytes"
+              echo "runtime createRequire shims left:"; grep -n "createRequire(import.meta.url)" $f | cut -c1-140
+              echo "calls through them:"; grep -noE "__require[0-9]*\(\"[^\"]+\"\)" $f | head
+              echo "forwarded-parse bundled: $(grep -c "function parse" $f) parse fn(s); copies of @opentelemetry/api: $(grep -c "opentelemetry.js.api" $f)"
+              mkdir -p /tmp/run && cp $f /tmp/run/index.mjs
+              echo "runs with no node_modules nearby:"; (cd /tmp/run && INPUT_TARGET-URL=http://127.0.0.1:1 timeout 10 node index.mjs 2>&1 | tail -2) || true
+            done
+          '
