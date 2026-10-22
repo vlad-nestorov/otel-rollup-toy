@@ -8,7 +8,9 @@
 //   3. loads the real entry with a dynamic import(), so the app's module graph is
 //      resolved only after the hooks exist (the same effect as `node --import`).
 
+import { realpathSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -133,27 +135,30 @@ export default function otel(options = {}) {
     name: 'otel',
 
     async buildStart() {
-      const instrumentationEntry = await resolveFrom(this, '@opentelemetry/instrumentation')
-
       // import-in-the-middle must be the copy @opentelemetry/instrumentation uses:
       // the loader's wrappers report to its lib/register.js, which is where the
-      // instrumentations' Hook() registrations live.
-      const iitm = (file) => resolveFrom(this, `import-in-the-middle/${file}`, instrumentationEntry)
+      // instrumentations' Hook() registrations live. Locate it with Node's resolver,
+      // not this.resolve(): going through the plugin chain lets @rollup/plugin-commonjs
+      // load lib/register.js as CommonJS before load() below can serve it as ESM.
+      const requireFromPlugin = createRequire(PLUGIN_FILE)
+      const requireFromInstrumentation = createRequire(requireFromPlugin.resolve('@opentelemetry/instrumentation'))
+      const iitmDir = path.dirname(requireFromInstrumentation.resolve('import-in-the-middle/package.json'))
+      const iitm = (file) => realpathSync(path.join(iitmDir, file))
 
       ids = {
-        api: await resolveFrom(this, '@opentelemetry/api'),
-        core: await resolveFrom(this, '@opentelemetry/core'),
-        contextAsyncHooks: await resolveFrom(this, '@opentelemetry/context-async-hooks'),
-        sdkTrace: await resolveFrom(this, '@opentelemetry/sdk-trace'),
-        resources: await resolveFrom(this, '@opentelemetry/resources'),
-        exporter: await resolveFrom(this, '@opentelemetry/exporter-trace-otlp-http'),
-        instrumentation: instrumentationEntry,
-        iitmHook: await iitm('hook.mjs'),
-        iitmRegisterHooks: await iitm('register-hooks.mjs'),
-        iitmCreateHook: await iitm('create-hook.mjs'),
-        iitmRegister: await iitm('lib/register.js'),
+        iitmHook: iitm('hook.mjs'),
+        iitmRegisterHooks: iitm('register-hooks.mjs'),
+        iitmCreateHook: iitm('create-hook.mjs'),
+        iitmRegister: iitm('lib/register.js'),
         instrumentations: {},
       }
+      ids.instrumentation = await resolveFrom(this, '@opentelemetry/instrumentation')
+      ids.api = await resolveFrom(this, '@opentelemetry/api')
+      ids.core = await resolveFrom(this, '@opentelemetry/core')
+      ids.contextAsyncHooks = await resolveFrom(this, '@opentelemetry/context-async-hooks')
+      ids.sdkTrace = await resolveFrom(this, '@opentelemetry/sdk-trace')
+      ids.resources = await resolveFrom(this, '@opentelemetry/resources')
+      ids.exporter = await resolveFrom(this, '@opentelemetry/exporter-trace-otlp-http')
       for (const name of instrumentations) {
         ids.instrumentations[name] = await resolveFrom(this, INSTRUMENTATIONS[name].pkg)
       }
