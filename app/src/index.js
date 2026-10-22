@@ -1,4 +1,5 @@
-// The action's source. Nothing here knows about OpenTelemetry.
+// The action's source. Its first import starts OpenTelemetry.
+import './otel.js'
 import http from 'node:http'
 import { getInput, info, setFailed } from './core.js'
 

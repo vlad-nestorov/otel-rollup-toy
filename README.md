@@ -1,15 +1,14 @@
 # otel-rollup-toy: main without the Rollup plugin
 
-This branch is `main` without the `rollup-plugin-otel` package and without any
-OpenTelemetry file in the app's `src/`. The action's source is identical to `main`'s, the
-output is still one self-contained bundle, and the spans come from the same stock OTel
-instrumentations. Compare with `main` and with the `option-1-externalize`,
+This branch is `main` without the `rollup-plugin-otel` package. The app starts
+OpenTelemetry itself with one import, the output is still one self-contained bundle, and
+the spans come from the same stock OTel instrumentations. Compare with `main` and with the `option-1-externalize`,
 `option-2-code-transformer` and `option-3-virtual-wrapper` branches.
 
 ```
 sdk/   otel-sdk-init: start() sets up the SDK, enables the stock http and undici
        instrumentations, patches node:http/node:https in place, flushes on exit
-app/   toy action: src/ has no OTel code; rollup.config.js starts otel-sdk-init first
+app/   toy action: src/index.js imports src/otel.js first, which calls start()
 ```
 
 ## Why the plugin isn't needed
@@ -25,22 +24,18 @@ then calls `syncBuiltinESMExports()` so named imports see the patch too. fetch i
 by `UndiciInstrumentation` through diagnostics channels, as before.
 
 Without loader hooks, `start()` only has to run before the action's first call, not
-before its modules load. A dynamic import isn't needed either: plain import order does it.
+before its modules load. So no bootstrap or dynamic import is needed: `src/otel.js` calls
+`start({ serviceName: 'toy-action' })`, and `src/index.js` imports it first. Static imports
+evaluate in order, so the SDK starts before any other module of the action runs.
 
 ## What's left in the build config
 
-`app/rollup.config.js` has two things:
-
-- A virtual entry, `otel:entry`, that imports `otel:start` (which calls
-  `start({ serviceName: 'toy-action' })`) and then `src/index.js`. Static imports
-  evaluate in order, so the SDK starts before any of the action's code runs. This is a
-  few lines of inline Rollup hooks, the only way to add an entry module without a file.
-- `exportConditions: ['node', 'require']`, which picks OTel's CommonJS builds. Their ESM
-  builds load some CommonJS dependencies (e.g. `forwarded-parse`) through a
-  `createRequire` shim Rollup can't follow, which `main`'s plugin rewrites; the CommonJS
-  builds use plain `require()`, which `@rollup/plugin-commonjs` bundles. The cost is that
-  packages pulled in both ways (e.g. `@opentelemetry/api`) can end up in the bundle twice.
-  That works, because OTel keeps its global state in a shared registry, but it's bigger.
+`app/rollup.config.js` is a plain config. The one OTel-related setting is
+`exportConditions: ['node', 'require']`, which picks OTel's CommonJS builds. Their ESM builds load some CommonJS dependencies (e.g. `forwarded-parse`) through a
+`createRequire` shim Rollup can't follow, which `main`'s plugin rewrites; the CommonJS
+builds use plain `require()`, which `@rollup/plugin-commonjs` bundles. The cost is that
+packages pulled in both ways (e.g. `@opentelemetry/api`) can end up in the bundle twice.
+That works, because OTel keeps its global state in a shared registry, but it's bigger.
 
 The output is a single `dist/index.js`, so `action.yml` and `output.file` stay as they were.
 
@@ -50,8 +45,8 @@ The output is a single `dist/index.js`, so `action.yml` and `output.file` stay a
   `node_modules` at runtime would need the loader hooks again (see `option-1-externalize`);
   a bundled third-party library needs option 2 or 3.
 - Code that grabs a builtin function before `start()` runs (e.g. `const get = http.get` at
-  the top of a module evaluated first) keeps the unpatched one. Starting the SDK first in
-  the entry avoids that for the action's own code.
+  the top of a module evaluated first) keeps the unpatched one. Keeping `./otel.js` the
+  first import of the entry avoids that for the action's own code.
 
 ## Run it
 
@@ -63,7 +58,8 @@ npm run verify
 `verify` builds the action, checks the bundle is one file with `start()` ahead of the
 action's code, runs it from a temp folder with no `node_modules` against a local fake
 collector, and checks that `http.get` and `fetch` exported spans whose IDs match the
-`traceparent` each request carried. A build without OpenTelemetry is the control.
+`traceparent` each request carried. The control build swaps `src/otel.js` for an empty
+module and must export nothing.
 
 CI (`.github/workflows/verify.yml`) runs `verify`, and also runs `uses: ./app` with every
 `node_modules` deleted, so the GitHub runner launches the bundle on its own Node 24.
