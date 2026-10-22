@@ -294,9 +294,20 @@ export default function otel(options = {}) {
 // shim call with a literal, non-builtin specifier into a static import so it gets
 // bundled. Builtins are left alone: they're always there at runtime.
 const SHIM_DECLARATION = /(?:var|let|const)\s+([\w$]+)\s*=\s*(?:\/\*[^*]*\*\/\s*)?createRequire\(\s*import\.meta\.url\s*\)/g
+const NAMED_IMPORT = /import\s*\{([^}]*)\}\s*from\s*["']([^"']+)["']/g
 
 function shimNames(code) {
-  return [...code.matchAll(SHIM_DECLARATION)].map((m) => m[1])
+  const names = [...code.matchAll(SHIM_DECLARATION)].map((m) => m[1])
+  // rolldown usually declares the shim once in a shared runtime module and imports it:
+  //   import { __require } from "./_virtual/_rolldown/runtime.mjs"
+  for (const [, specifiers, source] of code.matchAll(NAMED_IMPORT)) {
+    if (!source.includes('rolldown/runtime')) continue
+    for (const specifier of specifiers.split(',')) {
+      const m = /^\s*__require(?:\s+as\s+([\w$]+))?\s*$/.exec(specifier)
+      if (m) names.push(m[1] ?? '__require')
+    }
+  }
+  return names
 }
 
 function isBuiltin(specifier) {
@@ -331,9 +342,11 @@ function inlineCreateRequireCalls(code) {
   return { code: `${header}\n${changed}`, map: null }
 }
 
-function runtimeRequires(code) {
+function runtimeRequires(chunkCode) {
   const found = new Set()
-  for (const name of ['require', ...shimNames(code)]) {
+  // Crude comment stripping: good enough for a warning, avoids flagging examples in docs.
+  const code = chunkCode.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  for (const name of new Set(['require', '__require', ...shimNames(code)])) {
     const call = new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}\\(\\s*(["'])([^"']+)\\1\\s*\\)`, 'g')
     for (const m of code.matchAll(call)) {
       if (!isBuiltin(m[2]) && !m[2].startsWith('.')) found.add(m[2])
