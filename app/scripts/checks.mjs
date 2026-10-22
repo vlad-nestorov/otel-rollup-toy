@@ -14,7 +14,11 @@ export function createChecker() {
 }
 
 // What an instrumented run of the toy action must have produced at the fake backend.
-export function checkSpans({ spans, requests }, check, serviceName = 'toy-action') {
+export function checkSpans({ spans, requests, exports = [] }, check, serviceName = 'toy-action') {
+  console.log(`      export requests received: ${exports.length}`)
+  for (const e of exports) {
+    console.log(`        ${e.method} ${e.path}  ${e.contentType}  -> ${e.status}${e.error ? `  (${e.error})` : ''}`)
+  }
   const byPath = (p) =>
     spans.find((s) => s.kind === SPAN_KIND_CLIENT && JSON.stringify(s.attributes).includes(p))
   const viaHttp = byPath('/via-http')

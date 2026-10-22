@@ -10,7 +10,10 @@ if (!stateFile) throw new Error('usage: serve-fake-backend.mjs <port> <state-fil
 const backend = await startFakeBackend({
   port: Number(port),
   onChange: () =>
-    writeFileSync(stateFile, JSON.stringify({ spans: backend.spans, requests: backend.requests }, null, 2)),
+    writeFileSync(
+      stateFile,
+      JSON.stringify({ spans: backend.spans, requests: backend.requests, exports: backend.exports }, null, 2),
+    ),
 })
-writeFileSync(stateFile, JSON.stringify({ spans: [], requests: [] }))
+writeFileSync(stateFile, JSON.stringify({ spans: [], requests: [], exports: [] }))
 console.log(`fake backend listening on ${backend.url}`)

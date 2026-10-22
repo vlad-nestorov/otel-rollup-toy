@@ -50,7 +50,7 @@ async function runAction(root, env = {}) {
   child.stderr.on('data', (d) => (output += d))
   const code = await new Promise((resolve) => child.on('close', resolve))
   await backend.close()
-  return { code, output, spans: backend.spans, requests: backend.requests }
+  return { code, output, spans: backend.spans, requests: backend.requests, exports: backend.exports }
 }
 
 async function checkInstrumentedRun(title, root, env) {
@@ -58,7 +58,9 @@ async function checkInstrumentedRun(title, root, env) {
   const run = await runAction(root, env)
   const mode = /\[otel\] hooks=(\w+)/.exec(run.output)?.[1]
 
-  check('action exited 0', run.code === 0, run.code === 0 ? '' : run.output.trim())
+  console.log('      action output:')
+  for (const line of run.output.trim().split('\n').slice(-25)) console.log(`        | ${line}`)
+  check('action exited 0', run.code === 0)
   check('bootstrap registered the loader hooks', Boolean(mode), mode ? `hooks=${mode}` : 'no [otel] line')
   checkSpans(run, check)
   return mode

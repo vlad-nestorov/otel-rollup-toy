@@ -7,21 +7,30 @@ import { gunzipSync } from 'node:zlib'
 export async function startFakeBackend({ port = 0, onChange } = {}) {
   const spans = []
   const requests = []
+  const exports = [] // every request to /v1/traces, accepted or not
 
   const server = http.createServer((req, res) => {
     const chunks = []
     req.on('data', (chunk) => chunks.push(chunk))
     req.on('end', () => {
-      if (req.method === 'POST' && req.url === '/v1/traces') {
-        let body = Buffer.concat(chunks)
-        if (req.headers['content-encoding'] === 'gzip') body = gunzipSync(body)
-        if (!String(req.headers['content-type']).includes('json')) {
-          res.writeHead(415).end('expected OTLP/JSON')
-          return
+      if (req.url.startsWith('/v1/')) {
+        const attempt = { method: req.method, path: req.url, contentType: req.headers['content-type'] ?? null }
+        exports.push(attempt)
+        try {
+          let body = Buffer.concat(chunks)
+          if (req.headers['content-encoding'] === 'gzip') body = gunzipSync(body)
+          if (req.method !== 'POST' || req.url !== '/v1/traces' || !String(attempt.contentType).includes('json')) {
+            attempt.status = 415
+          } else {
+            collect(JSON.parse(body.toString('utf8')), spans)
+            attempt.status = 200
+          }
+        } catch (err) {
+          attempt.status = 400
+          attempt.error = err.message
         }
-        collect(JSON.parse(body.toString('utf8')), spans)
         onChange?.()
-        res.writeHead(200, { 'content-type': 'application/json' }).end('{}')
+        res.writeHead(attempt.status, { 'content-type': 'application/json' }).end('{}')
         return
       }
 
@@ -37,6 +46,7 @@ export async function startFakeBackend({ port = 0, onChange } = {}) {
     url: `http://127.0.0.1:${server.address().port}`,
     spans,
     requests,
+    exports,
     close: () =>
       new Promise((resolve) => {
         server.closeAllConnections()
