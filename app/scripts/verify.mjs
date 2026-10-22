@@ -1,8 +1,8 @@
-// Builds the toy action with and without the plugin, runs each build from a folder
+// Builds the toy action with and without OpenTelemetry, runs each build from a folder
 // with no node_modules (like an action checkout on a runner) against a fake backend,
 // and checks what was exported and propagated.
 import { spawn, spawnSync } from 'node:child_process'
-import { cp, mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
+import { cp, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -28,6 +28,8 @@ async function isolate(distDir) {
   const root = await mkdtemp(path.join(tmpdir(), 'otel-toy-'))
   tempDirs.push(root)
   await cp(distDir, path.join(root, 'dist'), { recursive: true })
+  // Like an action repo's package.json: dist/ is ESM.
+  await writeFile(path.join(root, 'package.json'), '{ "type": "module" }\n')
   return root
 }
 
@@ -56,52 +58,31 @@ async function runAction(root, env = {}) {
 async function checkInstrumentedRun(title, root, env) {
   console.log(`\n${title}`)
   const run = await runAction(root, env)
-  const mode = /\[otel\] hooks=(\w+)/.exec(run.output)?.[1]
+  const started = /\[otel\] hooks=\w+ patched=(\S+)/.exec(run.output)?.[1]
 
   console.log('      action output:')
   for (const line of run.output.trim().split('\n').slice(-25)) console.log(`        | ${line}`)
   check('action exited 0', run.code === 0)
-  check('bootstrap registered the loader hooks', Boolean(mode), mode ? `hooks=${mode}` : 'no [otel] line')
+  check('SDK started and patched the builtins', started === 'http,https', started ? `patched=${started}` : 'no [otel] line')
   checkSpans(run, check)
-  return mode
 }
 
 try {
-  console.log('Building with rollup-plugin-otel...')
+  console.log('Building with otel-sdk-init...')
   const dist = await build('rollup.config.js', 'dist')
 
   console.log('\nBuild output')
   const files = (await readdir(dist, { recursive: true })).sort()
   console.log(`      ${files.join(', ')}`)
-  for (const [file, role] of [
-    ['index.js', 'bootstrap entry'],
-    ['otel-hook.mjs', 'off-thread loader hook'],
-    ['otel-iitm-register.mjs', 'import-in-the-middle registry'],
-    ['package.json', 'type: module marker'],
-  ]) {
-    check(`${file} (${role})`, files.includes(file))
-  }
-  const entry = await readFile(path.join(dist, 'index.js'), 'utf8')
-  check('entry loads the app with a dynamic import()', /\bimport\(/.test(entry))
-  check('app code is not in the entry chunk', !entry.includes('via-http'))
+  check('a single file, dist/index.js', files.length === 1 && files[0] === 'index.js')
+  const bundle = await readFile(path.join(dist, 'index.js'), 'utf8')
+  const startCall = bundle.indexOf("serviceName: 'toy-action'")
+  check('start() comes before the action code in the bundle', startCall !== -1 && startCall < bundle.indexOf('via-http'))
 
   const root = await isolate(dist)
-  const autoMode = await checkInstrumentedRun(
-    `Run 1: hooks picked automatically (Node ${process.versions.node}), from ${root}`,
-    root,
-  )
-  if (autoMode !== 'async') {
-    await checkInstrumentedRun('Run 2: forced off-thread hooks (OTEL_ROLLUP_HOOKS=async)', root, {
-      OTEL_ROLLUP_HOOKS: 'async',
-    })
-  } else {
-    console.log(
-      `\n  note: in-thread sync hooks need Node >= 22.22.3 or >= 24.11.1; ` +
-        `Node ${process.versions.node} used the off-thread hook file, so only that path was exercised`,
-    )
-  }
+  await checkInstrumentedRun(`Run: Node ${process.versions.node}, from ${root}`, root)
 
-  console.log('\nControl: same app built without the plugin')
+  console.log('\nControl: same app built without OpenTelemetry')
   const controlRoot = await isolate(await build('rollup.config.control.js', 'dist-control'))
   const control = await runAction(controlRoot)
   check('action exited 0', control.code === 0, control.code === 0 ? '' : control.output.trim())

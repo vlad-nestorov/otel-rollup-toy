@@ -3,7 +3,6 @@
   "private": true,
   "type": "module",
   "workspaces": [
-    "plugin",
     "sdk",
     "app"
   ],

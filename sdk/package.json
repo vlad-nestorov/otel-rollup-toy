@@ -1,7 +1,7 @@
 {
   "name": "otel-sdk-init",
   "version": "0.1.0",
-  "description": "Starts OpenTelemetry tracing for a Node app or GitHub action: loader hooks, SDK, instrumentations, flush on exit",
+  "description": "Starts OpenTelemetry tracing for a bundled Node app or GitHub action: SDK, stock instrumentations applied to builtins in place, flush on exit",
   "type": "module",
   "exports": "./index.js",
   "dependencies": {
@@ -13,7 +13,6 @@
     "@opentelemetry/instrumentation-http": "^0.300.0",
     "@opentelemetry/instrumentation-undici": "^0.34.0",
     "@opentelemetry/resources": "^3.0.0",
-    "@opentelemetry/sdk-trace": "^3.0.0",
-    "import-in-the-middle": "^3.5.0"
+    "@opentelemetry/sdk-trace": "^3.0.0"
   }
 }
