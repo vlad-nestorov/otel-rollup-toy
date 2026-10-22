@@ -39,6 +39,9 @@ export default function otel(options = {}) {
     instrumentations = Object.keys(INSTRUMENTATIONS),
     hookFileName = 'otel-hook.mjs',
     registerFileName = 'otel-iitm-register.mjs',
+    // Runtime requires known to be optional (wrapped in try/catch by their callers),
+    // left out of the "not bundled" warning. `debug` probes for supports-color this way.
+    optionalRequires = ['supports-color'],
   } = options
 
   for (const name of instrumentations) {
@@ -269,7 +272,10 @@ export default function otel(options = {}) {
       // action has no node_modules to find it in.
       const leftover = new Set()
       for (const file of Object.values(bundle)) {
-        if (file.type === 'chunk') runtimeRequires(file.code).forEach((s) => leftover.add(s))
+        if (file.type !== 'chunk') continue
+        for (const specifier of runtimeRequires(file.code)) {
+          if (!optionalRequires.includes(specifier)) leftover.add(specifier)
+        }
       }
       if (leftover.size > 0) {
         this.warn(`[otel] these modules are still loaded with require() at runtime and are not bundled: ${[...leftover].join(', ')}`)

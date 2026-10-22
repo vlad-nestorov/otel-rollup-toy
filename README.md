@@ -62,29 +62,36 @@ to force one, and `OTEL_ROLLUP_DEBUG=1` to log which one ran.
 Runtime config: `OTEL_EXPORTER_OTLP_ENDPOINT` (default `http://localhost:4318`),
 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_SERVICE_NAME`.
 
-## Status and known risks
+## Status
 
-Written against OpenTelemetry JS 3.0 (`@opentelemetry/sdk-trace`, which replaced
-`sdk-trace-node`) and import-in-the-middle 3.5. The session that wrote this couldn't
-reach the npm registry, so the full build has not been run yet. What was checked
-without npm:
+Verified in GitHub Actions against OpenTelemetry JS 3.0 (`@opentelemetry/sdk-trace`, which
+replaced `sdk-trace-node`), import-in-the-middle 3.5 and Rollup 4. Both jobs pass:
 
-- the plugin loads, and its two rewrites of import-in-the-middle 3.5.2's source produce
-  valid ESM; the converted registry behaves like the original when driven the way a
-  generated wrapper drives it
-- the generated bootstrap and init modules are valid ESM
-- the action and the fake collector work end to end when run unbundled
+- `verify` (Node 24.22): in-thread sync hooks and forced off-thread hooks both export the
+  `http.get` span (instrumentation-http) and the `fetch` span (instrumentation-undici),
+  each with a matching `traceparent`; the control build exports nothing
+- `as-action`: the runner's own Node 24.21 runs `dist/index.js` with no `node_modules`,
+  picks the sync hook path, and the collector receives both spans
 
-The parts most likely to need adjusting on the first real build:
+What it took to get there, in case you adapt the plugin:
 
-- bundling import-in-the-middle's loader (create-hook plus the cjs/es module lexers) into
-  `otel-hook.mjs` and its shared chunk
-- `@rollup/plugin-commonjs` converting require-in-the-middle, which OTel's instrumentation
-  base pulls in
-- the plugin depends on two details of import-in-the-middle's internals (how the loader
+- Locate import-in-the-middle with Node's resolver. Going through `this.resolve()` let
+  `@rollup/plugin-commonjs` load its registry as CommonJS before the plugin could serve it
+  as ESM.
+- OTel's ESM builds load CommonJS dependencies (e.g. `forwarded-parse`) through a
+  rolldown `__require` shim imported from `_rolldown/runtime.mjs`. Rollup can't follow it,
+  so the plugin rewrites literal shim calls into static imports, and warns at build time
+  about any runtime `require()` of a non-builtin module left in the output
+  (`optionalRequires`, default `['supports-color']`, lists known-optional ones to ignore).
+- OTel 3.0 takes `new BatchSpanProcessor({ exporter })`, not the exporter as first argument.
+
+Remaining caveats:
+
+- The plugin depends on two details of import-in-the-middle's internals (how the loader
   computes the registry URL, and the registry's `exports.x = x` lines); it fails the build
-  with a clear message if either changes
-
-The entry module's own exports are not re-exported by the bootstrap. That's fine for
-actions and most apps; a library entry would need them generated from `this.load()`'s
-export list.
+  with a clear message if either changes.
+- The entry module's own exports are not re-exported by the bootstrap. That's fine for
+  actions and most apps; a library entry would need them generated from `this.load()`'s
+  export list.
+- `.github/scripts/annotate.sh` posts step output as annotations, so CI results are
+  readable through the checks API when raw job logs aren't reachable.
