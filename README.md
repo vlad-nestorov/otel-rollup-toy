@@ -30,14 +30,63 @@ evaluate in order, so the SDK starts before any other module of the action runs.
 
 ## What's left in the build config
 
-`app/rollup.config.js` is a plain config. The one OTel-related setting is
-`exportConditions: ['node', 'require']`, which picks OTel's CommonJS builds. Their ESM builds load some CommonJS dependencies (e.g. `forwarded-parse`) through a
-`createRequire` shim Rollup can't follow, which `main`'s plugin rewrites; the CommonJS
-builds use plain `require()`, which `@rollup/plugin-commonjs` bundles. The cost is size:
-CommonJS can't be tree-shaken, so the bundle grows from about 312 KB to about 1,018 KB,
-mostly `@opentelemetry/semantic-conventions` (285 KB) and `sdk-metrics` (145 KB) that the
-ESM build would drop. `main`'s plugin keeps the ESM builds and rewrites the one shim call
-into a static import instead.
+`app/rollup.config.js` has one OTel-specific piece: an inline `transform` hook,
+`bundleRequireShims`, documented at the top of the file. It's the same fix `main`'s plugin
+applies.
+
+**The problem it solves.** `@opentelemetry/instrumentation-http` imports the CommonJS
+package `forwarded-parse` with TypeScript's `import forwardedParse = require('forwarded-parse')`.
+OTel's build (tsdown, on rolldown) keeps that a real `require()` in the ESM output, through a
+shim built with `createRequire`:
+
+```js
+// dist/_virtual/_rolldown/runtime.mjs
+import { createRequire } from "node:module";
+var __require = /* #__PURE__ */ (() => createRequire(import.meta.url))();
+export { __require };
+
+// dist/utils.mjs
+import { __require } from "./_virtual/_rolldown/runtime.mjs";
+const forwardedParse = __require("forwarded-parse");
+```
+
+To Rollup, `__require` is just an imported function, so `forwarded-parse` isn't bundled and
+the call runs at runtime, resolving from the bundle's own location. Inside the repo it finds
+`node_modules` and works by accident; deployed without them, the action crashes with
+"Cannot find module 'forwarded-parse'".
+
+**What the transform does.** In files under `node_modules`, each call through such a shim
+with a string-literal, non-builtin specifier becomes a static import that Rollup bundles:
+
+```js
+import * as __otel_cjs_0 from "forwarded-parse";
+const __otel_interop = (m) => (m && m.default !== undefined ? m.default : m);
+const forwardedParse = __otel_interop(__otel_cjs_0);
+```
+
+`@rollup/plugin-commonjs` exposes `module.exports` as the default export, which the interop
+returns: the value `require()` would have returned. Builtins keep their runtime call, and
+`verify` fails if any non-builtin module is still required at runtime.
+
+**Limits.** Only string-literal specifiers are rewritten. It assumes the required module is
+CommonJS. The import runs when the importing module is evaluated rather than at the call,
+which for a top-level import-equals is the same moment.
+
+**Why not `exportConditions: ['node', 'require']`.** That picks OTel's CommonJS builds,
+whose plain `require()` calls `@rollup/plugin-commonjs` does bundle. But CommonJS can't be
+tree-shaken. Measured on this action:
+
+| Approach | Bundle | Runs without `node_modules` |
+| --- | --- | --- |
+| ESM builds, no transform | 312 KB | no: `forwarded-parse` is required at runtime |
+| ESM builds + this transform | 320 KB | yes |
+| `exportConditions: ['node', 'require']` | 1,018 KB | yes |
+
+Most of the CommonJS build's extra size is `@opentelemetry/semantic-conventions` (285 KB)
+and `sdk-metrics` (145 KB), which the ESM build drops. The real fix is upstream: OTel could
+enable rolldown's
+[`esmExternalRequirePlugin`](https://rolldown.rs/builtin-plugins/esm-external-require) for
+`forwarded-parse`, or use a default import with `esModuleInterop`.
 
 The output is a single `dist/index.js`, so `action.yml` and `output.file` stay as they were.
 
@@ -58,7 +107,7 @@ npm run verify
 ```
 
 `verify` builds the action, checks the bundle is one file with `start()` ahead of the
-action's code, runs it from a temp folder with no `node_modules` against a local fake
+action's code and nothing left to `require()` at runtime, runs it from a temp folder with no `node_modules` against a local fake
 collector, and checks that `http.get` and `fetch` exported spans whose IDs match the
 `traceparent` each request carried. The control build swaps `src/otel.js` for an empty
 module and must export nothing.
