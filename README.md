@@ -143,12 +143,14 @@ runtime module (as published) and when a file declares one itself.
 - The import runs when the importing module is evaluated, not at the call. For a
   top-level import-equals, as in OTel, that's the same moment.
 
-**Alternatives, measured on this toy.**
+**Alternatives, measured on this toy.** These are single-file bundles of the action without
+the loader-hook files (as on the `main-without-plugin` branch), so the approaches compare
+directly; `main`'s own output is 450 KB in total because it also ships the hook files.
 
 | Approach | Bundle | Runs without `node_modules` |
 | --- | --- | --- |
 | ESM builds, no transform | 312 KB | no: `forwarded-parse` is required at runtime |
-| ESM builds + this transform | about 312 KB plus `forwarded-parse` | yes |
+| ESM builds + this transform | 320 KB | yes |
 | `exportConditions: ['node', 'require']` (all CommonJS builds) | 1,018 KB | yes |
 | Only `instrumentation-http` aliased to its CommonJS build | 816 KB | yes |
 
