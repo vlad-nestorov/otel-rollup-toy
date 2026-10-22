@@ -2,11 +2,11 @@
 // with no node_modules (like an action checkout on a runner) against a fake backend,
 // and checks what was exported and propagated.
 import { spawn, spawnSync } from 'node:child_process'
-import { cp, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { checkSpans, createChecker } from './checks.mjs'
+import { checkSpans, createChecker, runtimeRequiresIn } from './checks.mjs'
 import { startFakeBackend } from './fake-backend.mjs'
 
 const appDir = fileURLToPath(new URL('..', import.meta.url))
@@ -78,10 +78,15 @@ try {
   console.log('\nBuild output')
   const files = (await readdir(dist, { recursive: true })).sort()
   console.log(`      ${files.join(', ')}`)
+  console.log(`      size: ${((await stat(path.join(dist, 'index.js'))).size / 1024).toFixed(0)} KB`)
   check('a single file, dist/index.js', files.length === 1 && files[0] === 'index.js')
   const bundle = await readFile(path.join(dist, 'index.js'), 'utf8')
   const startCall = bundle.indexOf("serviceName: 'toy-action'")
   check('start() comes before the action code in the bundle', startCall !== -1 && startCall < bundle.indexOf('via-http'))
+  // OTel's ESM builds load forwarded-parse through a createRequire shim, which the
+  // transform in rollup.config.js rewrites into a static import.
+  const leftovers = await runtimeRequiresIn(dist)
+  check('no non-builtin module left to require() at runtime', leftovers.length === 0, leftovers.join(', '))
 
   const root = await isolate(dist)
   await checkInstrumentedRun(`Run: Node ${process.versions.node}, from ${root}`, root)

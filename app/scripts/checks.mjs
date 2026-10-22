@@ -1,7 +1,30 @@
 // Assertions shared by verify.mjs (local runs) and check-backend.mjs (the CI job that
 // runs the built action through the GitHub runner).
+import { readdir, readFile } from 'node:fs/promises'
+import { builtinModules } from 'node:module'
+import path from 'node:path'
 
 const SPAN_KIND_CLIENT = 3
+
+// Non-builtin modules the built files in `dir` still load with require() at runtime:
+// plain `require("x")` or a call through a createRequire shim such as rolldown's
+// `__require("x")`. A deployed action has no node_modules, so each of these would throw
+// "Cannot find module" there. `supports-color` is the `debug` package's optional
+// require inside try/catch, which is meant to fail quietly.
+export async function runtimeRequiresIn(dir, { optional = ['supports-color'] } = {}) {
+  const found = new Set()
+  const call = /(?<![\w$.])(?:require|__require\w*)\(\s*["']([^"'.][^"']*)["']\s*\)/g
+  for (const file of await readdir(dir, { recursive: true })) {
+    if (!/\.m?js$/.test(file)) continue
+    // Drop comments so documentation examples don't count.
+    const code = (await readFile(path.join(dir, file), 'utf8')).replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    for (const [, specifier] of code.matchAll(call)) {
+      const builtin = specifier.startsWith('node:') || builtinModules.includes(specifier.split('/')[0])
+      if (!builtin && !optional.includes(specifier)) found.add(specifier)
+    }
+  }
+  return [...found]
+}
 const TRACEPARENT = /^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$/
 
 export function createChecker() {
