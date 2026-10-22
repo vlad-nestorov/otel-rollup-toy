@@ -33,9 +33,11 @@ evaluate in order, so the SDK starts before any other module of the action runs.
 `app/rollup.config.js` is a plain config. The one OTel-related setting is
 `exportConditions: ['node', 'require']`, which picks OTel's CommonJS builds. Their ESM builds load some CommonJS dependencies (e.g. `forwarded-parse`) through a
 `createRequire` shim Rollup can't follow, which `main`'s plugin rewrites; the CommonJS
-builds use plain `require()`, which `@rollup/plugin-commonjs` bundles. The cost is that
-packages pulled in both ways (e.g. `@opentelemetry/api`) can end up in the bundle twice.
-That works, because OTel keeps its global state in a shared registry, but it's bigger.
+builds use plain `require()`, which `@rollup/plugin-commonjs` bundles. The cost is size:
+CommonJS can't be tree-shaken, so the bundle grows from about 312 KB to about 1,018 KB,
+mostly `@opentelemetry/semantic-conventions` (285 KB) and `sdk-metrics` (145 KB) that the
+ESM build would drop. `main`'s plugin keeps the ESM builds and rewrites the one shim call
+into a static import instead.
 
 The output is a single `dist/index.js`, so `action.yml` and `output.file` stay as they were.
 
