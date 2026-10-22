@@ -28,4 +28,5 @@ jobs:
             echo "## @opentelemetry/api exports"; node -p "JSON.stringify(require(\"./node_modules/@opentelemetry/api/package.json\").exports)"
           '
       - name: Bundle each way and see what is left behind
-        run: .github/scripts/annotate.sh 'diag: bundle comparison' node app/scripts/diag-bundles.mjs
+        run: |
+          .github/scripts/annotate.sh 'diag: bundle comparison' node app/scripts/diag-bundles.mjs
