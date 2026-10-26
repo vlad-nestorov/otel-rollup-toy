@@ -1,9 +1,19 @@
 name: toy-action
-description: Toy JavaScript action instrumented by rollup-plugin-otel
+description: Toy JavaScript action instrumented with OpenTelemetry
 inputs:
   target-url:
     description: Base URL the action calls with node:http and fetch
     required: true
+  api-token:
+    description: >-
+      Optional token. The action registers it as a secret and logs it at debug level, to
+      show that exported log records are masked like the runner's own log
+    required: false
+  otel-service-name:
+    description: >-
+      service.name for the telemetry the action exports. When empty, OTEL_SERVICE_NAME,
+      then the action's built-in name. No default here, so that fallback can apply
+    required: false
 runs:
   using: node24
   main: dist/index.js
