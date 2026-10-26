@@ -8,6 +8,7 @@
     "verify": "node scripts/verify.mjs"
   },
   "dependencies": {
+    "@actions/core": "^3.1.0",
     "dataloader": "^2.2.3",
     "otel-sdk-init": "*"
   },
