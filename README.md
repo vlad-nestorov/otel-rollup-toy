@@ -1,11 +1,13 @@
-# otel-rollup-toy
+# otel-rollup-toy: Rollup plugin, SDK prebundled as CommonJS
+
+_One of several approaches, each on its own branch; `main` compares them._
 
 A Rollup plugin and an SDK package that add OpenTelemetry auto-instrumentation to an ESM
 build, plus a toy GitHub JavaScript action that uses them without any OTel code in its source.
 
 > **Branch `sdk-prebundled-cjs`:** `otel-sdk-init` is prebundled from OpenTelemetry's
 > CommonJS builds, so the plugin no longer rewrites the `createRequire` shim. It works, but
-> the action's output grows from 451 KB to 1,105 KB; see [The createRequire
+> the action's output grows from 451 KB on `sdk-esm-shim-transform` to 1,105 KB; see [The createRequire
 > shim](#the-createrequire-shim).
 
 ```
@@ -88,7 +90,7 @@ Runtime settings, read by `otel-sdk-init`: `OTEL_EXPORTER_OTLP_ENDPOINT` (defaul
 
 ## The createRequire shim
 
-One OTel dependency doesn't bundle from OTel's ESM builds. `main` fixes that with a
+One OTel dependency doesn't bundle from OTel's ESM builds. `sdk-esm-shim-transform` fixes that with a
 transform in the plugin; this branch avoids it by building `otel-sdk-init` from the
 CommonJS builds first.
 
@@ -137,7 +139,7 @@ registry, so the app's build has to bundle the one copy the SDK requires.
 
 **What it costs, measured in one CI run.** Full output of the toy action:
 
-| | `main` (ESM builds + shim transform) | this branch (CommonJS prebundle) |
+| | `sdk-esm-shim-transform` (ESM builds + shim transform) | this branch (CommonJS prebundle) |
 | --- | --- | --- |
 | OTel chunk (`_otel-init-*.js`) | 312 KB | 965 KB |
 | import-in-the-middle loader chunk (`create-hook-*.js`) | 128 KB | 128 KB |
@@ -145,19 +147,19 @@ registry, so the app's build has to bundle the one copy the SDK requires.
 | **Total** | **451 KB** | **1,105 KB** |
 
 The prebundle itself is 930 KB. CommonJS can't be tree-shaken, so it carries all of
-`@opentelemetry/semantic-conventions` (285 KB; 16 KB on `main`) and `sdk-metrics` (128 KB;
-not on `main` at all), which the CommonJS build of `otlp-transformer` pulls in, plus 69 KB
+`@opentelemetry/semantic-conventions` (285 KB; 16 KB from the ESM builds) and `sdk-metrics` (128 KB;
+not in the ESM builds' output at all), which the CommonJS build of `otlp-transformer` pulls in, plus 69 KB
 of `otlp-transformer`. With `commonjs()`'s default `strictRequires` every module is
 wrapped in a function and the total is 1,176 KB; `strictRequires: 'auto'` gets it to the
 1,105 KB above.
 
 **Other alternatives, measured earlier.** These are single-file bundles of the action
-without the loader-hook files (as on the `main-without-plugin` branch):
+without the loader-hook files (as on the `sdk-esm-shim-transform-no-plugin` branch):
 
 | Approach | Bundle | Runs without `node_modules` |
 | --- | --- | --- |
 | ESM builds, no transform | 312 KB | no: `forwarded-parse` is required at runtime |
-| ESM builds + `main`'s transform | 320 KB | yes |
+| ESM builds + the shim transform | 320 KB | yes |
 | `exportConditions: ['node', 'require']` in the app's build (all CommonJS builds) | 1,018 KB | yes |
 | Only `instrumentation-http` aliased to its CommonJS build | 816 KB | yes |
 
