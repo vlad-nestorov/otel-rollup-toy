@@ -1,8 +1,10 @@
 # otel-rollup-toy: option 3, build-time wrapper modules
 
+_One of several approaches, each on its own branch; `main` compares them._
+
 This branch shows `otel-sdk-init` used without a dedicated Rollup plugin package, by
 routing imports of instrumented libraries through generated wrapper modules: a few lines
-of inline hooks in `app/rollup.config.js`. Compare with `main`, where
+of inline hooks in `app/rollup.config.js`. Compare with `sdk-esm-shim-transform`, where
 `rollup-plugin-otel` makes the hook-based SDK work bundled, and with the
 `option-1-externalize` and `option-2-code-transformer` branches.
 
@@ -40,7 +42,7 @@ app/   toy action: src/main.js calls start() then imports src/index.js, which us
   that go through the wrapper, not calls inside the library.
 - This wrapper handles CommonJS libraries whose API is their `module.exports`. Named ESM
   exports, `export *` and instrumentations that patch internal files need more generated
-  code (see `main`'s plugin for the general version through import-in-the-middle).
+  code (see `sdk-esm-shim-transform`'s plugin for the general version through import-in-the-middle).
 - OTel's http instrumentation isn't used here: its ESM build loads `forwarded-parse`
   through a `require` shim that Rollup can't bundle without a plugin to rewrite it.
 
