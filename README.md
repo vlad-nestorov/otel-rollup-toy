@@ -11,6 +11,35 @@ sdk/      otel-sdk-init: start() sets up loader hooks, the SDK, instrumentations
 app/      toy action: depends on otel-sdk-init; src/ has no OTel code; rollup.config.js adds otel()
 ```
 
+## GitHub Actions: service name and logs
+
+`start()` takes `service.name` from the action's `otel-service-name` input at runtime,
+then from `OTEL_SERVICE_NAME`, then from its `serviceName` option. `action.yml` declares
+the input without a default, so the fallbacks can apply.
+
+It also exports what the action logs through `@actions/core` as OTLP log records, to
+`/v1/logs` (or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`). `@actions/core` writes every log call
+to stdout, so `sdk/actions.js` watches `process.stdout`:
+
+- plain lines, which is what `core.info()` and `console.log()` write, become INFO records
+- `::debug::`, `::notice::`, `::warning::` and `::error::` (`core.setFailed()` writes the
+  last) become records of that severity, with annotation properties such as `file` and
+  `line` as `actions.annotation.*` attributes
+- other workflow commands (groups, outputs, state) are skipped
+- values registered with `core.setSecret()` are replaced by `***`, as in the runner's log
+
+This works the same however `@actions/core` is bundled, and it catches the calls
+`@actions/core` makes internally, which patching its exports would miss. Two things differ
+from the runner's own log: debug records are exported even when step debug logging is off,
+and a secret the runner masks but the action never registered with `core.setSecret()` (an
+input filled from `secrets.*`, say) is exported as is. `actionsLogs: false` in `start()`'s
+options turns the capture off. OTel's own diagnostics go to stderr, so they're never
+captured.
+
+The toy action uses the real `@actions/core`, and logs an `api-token` input at debug level
+after registering it as a secret, so the checks can confirm that no exported record
+contains it.
+
 ## Run it
 
 Needs Node 22 or later.
@@ -30,9 +59,14 @@ npm run verify
 - checks that `http.get` and `fetch` each exported a CLIENT span, that the `traceparent`
   header the target received carries that span's trace and span IDs, and that spans
   carry `service.name=toy-action`
-- runs a second time with `OTEL_ROLLUP_HOOKS=async` when the first run used in-thread hooks,
-  so both hook paths get exercised on Node versions that support sync hooks
-- builds and runs the same app without the plugin as a control: no spans, no traceparent
+- checks that `core.info()` and `core.debug()` were exported as log records, that none
+  contains the `api-token` the action registered as a secret, and that they carry the same
+  `service.name`
+- runs a second time with `OTEL_ROLLUP_HOOKS=async` and the `otel-service-name` input set
+  when the first run used in-thread hooks, so both hook paths get exercised on Node versions
+  that support sync hooks
+- builds and runs the same app without the plugin as a control: no spans, no traceparent,
+  no log records
 
 It prints a ✓/✗ line per check and exits non-zero on any failure.
 
@@ -43,8 +77,10 @@ It prints a ✓/✗ line per check and exits non-zero on any failure.
 - `verify`: `npm install && npm run verify` on Node 24
 - `as-action`: builds, deletes every `node_modules`, starts the fake backend, then runs the
   built action with `uses: ./app`, so the runner itself launches `dist/index.js` on its
-  bundled Node 24 with no node flags, exactly as it would for a published action. A last
-  step checks the spans and `traceparent` headers the backend received. The action's log
+  bundled Node 24 with no node flags, exactly as it would for a published action. The action
+  gets `otel-service-name` and `api-token` inputs, plus an `OTEL_SERVICE_NAME` the input has
+  to override, and a last step checks the spans, `traceparent` headers and log records the
+  backend received. The action's log
   line `[otel] hooks=… node=…` shows which hook path the runner's Node version took.
 
 ## How the work is split
@@ -76,8 +112,9 @@ otel({ sdkOptions: { serviceName: 'toy-action' } })
 | `renderStart` / `generateBundle` | Fails the build on non-ESM output, `inlineDynamicImports`, or a hook file that would load the bootstrap or SDK; warns about runtime `require()`s left in the output |
 
 Runtime settings, read by `otel-sdk-init`: `OTEL_EXPORTER_OTLP_ENDPOINT` (default
-`http://localhost:4318`), `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_SERVICE_NAME`,
-`OTEL_LOG_LEVEL`; `OTEL_ROLLUP_HOOKS=sync|async` forces a hook path and
+`http://localhost:4318`), `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`,
+`OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, `OTEL_SERVICE_NAME` (after the `otel-service-name`
+input), `OTEL_LOG_LEVEL`; `OTEL_ROLLUP_HOOKS=sync|async` forces a hook path and
 `OTEL_ROLLUP_DEBUG=1` logs which one ran.
 
 ## The createRequire shim
@@ -147,7 +184,8 @@ runtime module (as published) and when a file declares one itself.
 
 **Alternatives, measured on this toy.** These are single-file bundles of the action without
 the loader-hook files (as on the `sdk-esm-shim-transform-no-plugin` branch), so the approaches compare
-directly; this branch's own output is 450 KB in total because it also ships the hook files.
+directly; this branch's own output was 450 KB in total then, because it also ships the hook
+files. They predate the real `@actions/core` and the logs exporter; `main` has current sizes.
 
 | Approach | Bundle | Runs without `node_modules` |
 | --- | --- | --- |
@@ -174,9 +212,11 @@ replaced `sdk-trace-node`), import-in-the-middle 3.5 and Rollup 4. Both jobs pas
 
 - `verify` (Node 24.22): in-thread sync hooks and forced off-thread hooks both export the
   `http.get` span (instrumentation-http) and the `fetch` span (instrumentation-undici),
-  each with a matching `traceparent`; the control build exports nothing
+  each with a matching `traceparent`, plus the action's `@actions/core` output as log
+  records; the control build exports nothing
 - `as-action`: the runner's own Node 24.21 runs `dist/index.js` with no `node_modules`,
-  picks the sync hook path, and the collector receives both spans
+  picks the sync hook path, and the collector receives both spans and the log records,
+  under the `service.name` from the `otel-service-name` input
 
 What it took to get there, in case you adapt the plugin:
 
@@ -187,7 +227,9 @@ What it took to get there, in case you adapt the plugin:
   Rollup can't follow; the plugin rewrites the call into a static import (see "The
   createRequire shim" above). `optionalRequires`, default `['supports-color']`, lists
   requires that are meant to fail quietly and stay out of the build warning.
-- OTel 3.0 takes `new BatchSpanProcessor({ exporter })`, not the exporter as first argument.
+- OTel 3.0 takes `new BatchSpanProcessor({ exporter })`, not the exporter as first argument,
+  and `BatchLogRecordProcessor` the same way. Its logs API is part of `@opentelemetry/api`
+  1.10 now.
 
 Remaining caveats:
 
