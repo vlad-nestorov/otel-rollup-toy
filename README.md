@@ -5,8 +5,8 @@ _One of several approaches, each on its own branch; `main` compares them._
 This branch is `sdk-esm-shim-transform-no-plugin` with `otel-sdk-init` prebundled from OpenTelemetry's
 CommonJS builds, the way `sdk-prebundled-cjs` does it for `sdk-esm-shim-transform`. The app starts
 OpenTelemetry itself with one import, its Rollup config has nothing OTel-specific in it,
-and the output is still one self-contained bundle. The cost is size: 972 KB instead of
-`sdk-esm-shim-transform-no-plugin`'s 320 KB (see [Size](#size)).
+and the output is still one self-contained bundle. The cost is size: 1,026 KB of OpenTelemetry
+code instead of `sdk-esm-shim-transform-no-plugin`'s 360 KB (see [Size](#size)).
 
 ```
 sdk/   otel-sdk-init: start() sets up the SDK, enables the stock http and undici
@@ -75,14 +75,16 @@ dependency. `verify` still fails if any non-builtin module is left to `require()
 CommonJS can't be tree-shaken, so the prebundle carries all of
 `@opentelemetry/semantic-conventions` (285 KB, against 16 KB from the ESM build) and
 `sdk-metrics` (about 130 KB, which the CommonJS build of `otlp-transformer` pulls in and the
-ESM build doesn't include at all). Measured in CI, all with the same OTel versions:
+ESM build doesn't include at all). Measured in CI with the same OTel versions;
+OpenTelemetry's share is each output minus the same action built without OpenTelemetry
+(966 KB, nearly all of it `@actions/core` and what it pulls in):
 
-| Branch | SDK | Rollup plugin | Action output |
-| --- | --- | --- | --- |
-| `sdk-esm-shim-transform-no-plugin` | ESM builds + inline transform in the app's config | no | 320 KB |
-| this branch | CommonJS prebundle | no | 972 KB |
-| `sdk-esm-shim-transform` | ESM builds + transform in the plugin | yes | 451 KB |
-| `sdk-prebundled-cjs` | CommonJS prebundle | yes | 1,105 KB |
+| Branch | SDK | Rollup plugin | Action output | OpenTelemetry's share |
+| --- | --- | --- | --- | --- |
+| `sdk-esm-shim-transform-no-plugin` | ESM builds + inline transform in the app's config | no | 1,326 KB | 360 KB |
+| this branch | CommonJS prebundle | no | 1,992 KB | 1,026 KB |
+| `sdk-esm-shim-transform` | ESM builds + transform in the plugin | yes | 1,458 KB | 492 KB |
+| `sdk-prebundled-cjs` | CommonJS prebundle | yes | 2,125 KB | 1,159 KB |
 
 The branches with the plugin also ship import-in-the-middle's loader (128 KB) for its
 loader hooks; the ones without it patch the builtins in place and don't need it.
@@ -106,6 +108,35 @@ would bundle as is, with no transform and no CommonJS cost.
   the top of a module evaluated first) keeps the unpatched one. Keeping `./otel.js` the
   first import of the entry avoids that for the action's own code.
 
+## GitHub Actions: service name and logs
+
+`start()` takes `service.name` from the action's `otel-service-name` input at runtime,
+then from `OTEL_SERVICE_NAME`, then from its `serviceName` option. `action.yml` declares
+the input without a default, so the fallbacks can apply.
+
+It also exports what the action logs through `@actions/core` as OTLP log records, to
+`/v1/logs` (or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`). `@actions/core` writes every log call
+to stdout, so `sdk/src/actions.js` watches `process.stdout`:
+
+- plain lines, which is what `core.info()` and `console.log()` write, become INFO records
+- `::debug::`, `::notice::`, `::warning::` and `::error::` (`core.setFailed()` writes the
+  last) become records of that severity, with annotation properties such as `file` and
+  `line` as `actions.annotation.*` attributes
+- other workflow commands (groups, outputs, state) are skipped
+- values registered with `core.setSecret()` are replaced by `***`, as in the runner's log
+
+This works the same however `@actions/core` is bundled, and it catches the calls
+`@actions/core` makes internally, which patching its exports would miss. Two things differ
+from the runner's own log: debug records are exported even when step debug logging is off,
+and a secret the runner masks but the action never registered with `core.setSecret()` (an
+input filled from `secrets.*`, say) is exported as is. `actionsLogs: false` in `start()`'s
+options turns the capture off. OTel's own diagnostics go to stderr, so they're never
+captured.
+
+The toy action uses the real `@actions/core`, and logs an `api-token` input at debug level
+after registering it as a secret, so the checks can confirm that no exported record
+contains it.
+
 ## Run it
 
 ```sh
@@ -116,8 +147,13 @@ npm run verify
 `verify` builds `otel-sdk-init`, then the action, checks the bundle is one file with `start()` ahead of the
 action's code and nothing left to `require()` at runtime, runs it from a temp folder with no `node_modules` against a local fake
 collector, and checks that `http.get` and `fetch` exported spans whose IDs match the
-`traceparent` each request carried. The control build swaps `src/otel.js` for an empty
-module and must export nothing.
+`traceparent` each request carried. It also checks that `core.info()` and `core.debug()`
+were exported as log records, that none contains the `api-token` the action registered as a
+secret, and that spans and records carry `service.name`, taken from the
+`otel-service-name` input in a second run. The control build swaps `src/otel.js` for an
+empty module and must export nothing.
 
 CI (`.github/workflows/verify.yml`) runs `verify`, and also runs `uses: ./app` with every
 `node_modules` deleted, so the GitHub runner launches the bundle on its own Node 24.
+That run passes the `otel-service-name` and `api-token` inputs, plus an
+`OTEL_SERVICE_NAME` the input has to override.
