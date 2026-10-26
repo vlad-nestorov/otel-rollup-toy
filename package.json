@@ -7,7 +7,7 @@
     "app"
   ],
   "scripts": {
-    "build": "npm run build -w app",
-    "verify": "npm run verify -w app"
+    "build": "npm run build -w sdk && npm run build -w app",
+    "verify": "npm run build -w sdk && npm run verify -w app"
   }
 }

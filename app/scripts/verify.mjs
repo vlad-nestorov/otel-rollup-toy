@@ -83,8 +83,8 @@ try {
   const bundle = await readFile(path.join(dist, 'index.js'), 'utf8')
   const startCall = bundle.indexOf("serviceName: 'toy-action'")
   check('start() comes before the action code in the bundle', startCall !== -1 && startCall < bundle.indexOf('via-http'))
-  // OTel's ESM builds load forwarded-parse through a createRequire shim, which the
-  // transform in rollup.config.js rewrites into a static import.
+  // OTel's ESM builds load forwarded-parse through a createRequire shim; otel-sdk-init is
+  // prebundled from the CommonJS builds to avoid it (see the README).
   const leftovers = await runtimeRequiresIn(dist)
   check('no non-builtin module left to require() at runtime', leftovers.length === 0, leftovers.join(', '))
 

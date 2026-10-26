@@ -6,6 +6,9 @@
 // can be patched in place. So start() runs the stock OTel instrumentations' own patch
 // functions on node:http and node:https directly, and fetch is covered by undici's
 // diagnostics channels. start() just has to run before the app makes its first call.
+//
+// The package ships this file prebundled with its OpenTelemetry dependencies as
+// dist/index.cjs (see rollup.config.js), so the app's build needs no OTel-specific setup.
 
 import { builtinModules, syncBuiltinESMExports } from 'node:module'
 import { context, diag, DiagConsoleLogger, DiagLogLevel, propagation, trace } from '@opentelemetry/api'
