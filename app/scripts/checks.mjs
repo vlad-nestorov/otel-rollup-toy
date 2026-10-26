@@ -60,8 +60,8 @@ export function checkLogs({ logs = [] }, check, { serviceName = 'toy-action', to
   const result = logs.find((l) => l.severityNumber === SEVERITY_INFO && String(l.body).startsWith('http.get -> '))
   check('core.info() exported an INFO log record', Boolean(result), result ? '' : `${logs.length} records received`)
   if (token) {
-    const auth = logs.find((l) => l.severityNumber === SEVERITY_DEBUG && String(l.body).startsWith('Authorization:'))
-    check('core.debug() exported a DEBUG log record, secret masked', auth?.body === 'Authorization: Bearer ***', auth?.body ?? 'none received')
+    const auth = logs.find((l) => l.severityNumber === SEVERITY_DEBUG && String(l.body).startsWith('api-token:'))
+    check('core.debug() exported a DEBUG log record, secret masked', auth?.body === 'api-token: ***', auth?.body ?? 'none received')
     check('no log record contains the secret', logs.every((l) => !JSON.stringify(l).includes(token)))
   }
   check('workflow commands were parsed, not exported as text', logs.every((l) => !String(l.body).startsWith('::')))
