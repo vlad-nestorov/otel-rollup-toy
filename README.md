@@ -3,9 +3,15 @@
 A Rollup plugin and an SDK package that add OpenTelemetry auto-instrumentation to an ESM
 build, plus a toy GitHub JavaScript action that uses them without any OTel code in its source.
 
+> **Branch `sdk-prebundled-cjs`:** `otel-sdk-init` is prebundled from OpenTelemetry's
+> CommonJS builds, so the plugin no longer rewrites the `createRequire` shim. It works, but
+> the action's output grows from 451 KB to 1,105 KB; see [The createRequire
+> shim](#the-createrequire-shim).
+
 ```
 plugin/   rollup-plugin-otel: the Rollup part only, no OpenTelemetry dependencies
-sdk/      otel-sdk-init: start() sets up loader hooks, the SDK, instrumentations and flushing
+sdk/      otel-sdk-init: start() sets up loader hooks, the SDK, instrumentations and flushing;
+          builds itself into dist/index.cjs with its OTel dependencies bundled
 app/      toy action: depends on otel-sdk-init; src/ has no OTel code; rollup.config.js adds otel()
 ```
 
@@ -18,7 +24,7 @@ npm install
 npm run verify
 ```
 
-`verify` builds the action, copies `dist/` to a temp folder with no `node_modules`
+`verify` builds `otel-sdk-init`, then the action, copies `dist/` to a temp folder with no `node_modules`
 (like an action checkout on a runner), runs it against a local fake collector, then:
 
 - checks the build output: `index.js` (bootstrap), `otel-hook.mjs` (loader hook),
@@ -47,7 +53,9 @@ It prints a ✓/✗ line per check and exits non-zero on any failure.
 
 ## How the work is split
 
-`otel-sdk-init` owns everything about OpenTelemetry and doesn't know about Rollup. Its
+`otel-sdk-init` owns everything about OpenTelemetry and doesn't know about the app's
+bundler. It ships as one prebundled CommonJS file, `dist/index.cjs` (built by
+`sdk/rollup.config.js`), with `import-in-the-middle` as its only dependency. Its
 `start({ serviceName, instrumentations, hookUrl })`:
 
 - registers import-in-the-middle's loader hooks for the modules the chosen instrumentations
@@ -66,10 +74,10 @@ otel({ sdkOptions: { serviceName: 'toy-action' } })
 
 | Rollup hook | Job |
 | --- | --- |
-| `buildStart` | Resolves the SDK package (option `sdk`, default `otel-sdk-init`) from the project, and import-in-the-middle through the SDK's `@opentelemetry/instrumentation`; emits `otel-hook.mjs`, `otel-iitm-register.mjs` and `package.json` |
+| `buildStart` | Resolves the SDK package (option `sdk`, default `otel-sdk-init`) from the project, and import-in-the-middle from the SDK package; emits `otel-hook.mjs`, `otel-iitm-register.mjs` and `package.json` |
 | `resolveId` | Swaps each entry for `<real id>?otel-entry`, so the entry keeps its file name |
 | `load` | Generates the bootstrap (`import '\0otel-init'; await import(realEntry)`) and the init module (`import { start } from 'otel-sdk-init'; start({ ...sdkOptions, hookUrl })`); serves import-in-the-middle's CommonJS registry as ESM |
-| `transform` | Points import-in-the-middle's loader at the emitted registry file; rewrites CommonJS `require` shims in `node_modules` into static imports; warns if a browser build of OTel was bundled |
+| `transform` | Points import-in-the-middle's loader at the emitted registry file |
 | `outputOptions` | Turns `output.file` into `output.dir` + the same entry file name |
 | `renderStart` / `generateBundle` | Fails the build on non-ESM output, `inlineDynamicImports`, or a hook file that would load the bootstrap or SDK; warns about runtime `require()`s left in the output |
 
@@ -80,9 +88,9 @@ Runtime settings, read by `otel-sdk-init`: `OTEL_EXPORTER_OTLP_ENDPOINT` (defaul
 
 ## The createRequire shim
 
-One OTel dependency doesn't bundle on its own. The plugin's `transform` hook fixes it; the
-full explanation is also in `plugin/index.js` under "CommonJS dependencies loaded through
-a createRequire shim".
+One OTel dependency doesn't bundle from OTel's ESM builds. `main` fixes that with a
+transform in the plugin; this branch avoids it by building `otel-sdk-init` from the
+CommonJS builds first.
 
 **Where it comes from.** `@opentelemetry/instrumentation-http` imports the CommonJS
 package `forwarded-parse` with TypeScript's import-equals syntax:
@@ -119,46 +127,43 @@ resolves `forwarded-parse` starting from `dist/`. Run inside the repo, it finds 
 `node_modules` and works by accident. Deployed without `node_modules`, the action crashes
 with "Cannot find module 'forwarded-parse'". (Checked in CI, both ways.)
 
-**What the plugin does.** In files under `node_modules`, every call through such a shim
-with a string-literal, non-builtin specifier becomes a static import:
+**What this branch does.** `sdk/rollup.config.js` bundles `otel-sdk-init` with
+`exportConditions: ['node', 'require']`, which picks OTel's CommonJS builds. Their plain
+`require("forwarded-parse")` is something `@rollup/plugin-commonjs` bundles, so the app's
+build only ever sees one CommonJS file and the plugin needs no shim handling.
+`import-in-the-middle` stays external: the plugin emits its loader hook and registry as
+separate files, and the instrumentations' `Hook()` calls must register with that same
+registry, so the app's build has to bundle the one copy the SDK requires.
 
-```js
-import * as __otel_cjs_0 from "forwarded-parse";
-const __otel_interop = (m) => (m && m.default !== undefined ? m.default : m);
-const forwardedParse = __otel_interop(__otel_cjs_0);
-```
+**What it costs, measured in one CI run.** Full output of the toy action:
 
-`@rollup/plugin-commonjs` exposes a CommonJS module's `module.exports` as its default
-export, which `__otel_interop` returns: the same value `require()` would have. The shim is
-then unused and tree-shaken away. It finds shims both when they're imported from rolldown's
-runtime module (as published) and when a file declares one itself.
+| | `main` (ESM builds + shim transform) | this branch (CommonJS prebundle) |
+| --- | --- | --- |
+| OTel chunk (`_otel-init-*.js`) | 312 KB | 965 KB |
+| import-in-the-middle loader chunk (`create-hook-*.js`) | 128 KB | 128 KB |
+| Registry, bootstrap, hook entry | 11 KB | 11 KB |
+| **Total** | **451 KB** | **1,105 KB** |
 
-**Limits.**
+The prebundle itself is 930 KB. CommonJS can't be tree-shaken, so it carries all of
+`@opentelemetry/semantic-conventions` (285 KB; 16 KB on `main`) and `sdk-metrics` (128 KB;
+not on `main` at all), which the CommonJS build of `otlp-transformer` pulls in, plus 69 KB
+of `otlp-transformer`. With `commonjs()`'s default `strictRequires` every module is
+wrapped in a function and the total is 1,176 KB; `strictRequires: 'auto'` gets it to the
+1,105 KB above.
 
-- Only string-literal specifiers. `generateBundle` warns about any runtime `require()` of a
-  non-builtin module still in the output, and `verify` fails on one.
-- Builtins (`node:http`, `fs`, ...) keep the runtime call; Node always has them.
-- It assumes the required module is CommonJS. `require()` of an ES module returns its
-  namespace, while the interop returns its default export when it has one.
-- The import runs when the importing module is evaluated, not at the call. For a
-  top-level import-equals, as in OTel, that's the same moment.
-
-**Alternatives, measured on this toy.** These are single-file bundles of the action without
-the loader-hook files (as on the `main-without-plugin` branch), so the approaches compare
-directly; `main`'s own output is 450 KB in total because it also ships the hook files.
+**Other alternatives, measured earlier.** These are single-file bundles of the action
+without the loader-hook files (as on the `main-without-plugin` branch):
 
 | Approach | Bundle | Runs without `node_modules` |
 | --- | --- | --- |
 | ESM builds, no transform | 312 KB | no: `forwarded-parse` is required at runtime |
-| ESM builds + this transform | 320 KB | yes |
-| `exportConditions: ['node', 'require']` (all CommonJS builds) | 1,018 KB | yes |
+| ESM builds + `main`'s transform | 320 KB | yes |
+| `exportConditions: ['node', 'require']` in the app's build (all CommonJS builds) | 1,018 KB | yes |
 | Only `instrumentation-http` aliased to its CommonJS build | 816 KB | yes |
 
-The CommonJS builds use plain `require()`, which `@rollup/plugin-commonjs` bundles, but
-CommonJS can't be tree-shaken: most of the extra size is
-`@opentelemetry/semantic-conventions` (285 KB) and `sdk-metrics` (145 KB), which the ESM
-build drops. Aliasing just one package still pulls the CommonJS copies of its own
-dependencies in next to the ESM ones.
+Prebundling the SDK as CommonJS ends up in the same range as using the CommonJS builds in
+the app's own build: the cost comes from the CommonJS builds themselves, not from where
+they get bundled.
 
 The fix belongs upstream: OTel could enable rolldown's
 [`esmExternalRequirePlugin`](https://rolldown.rs/builtin-plugins/esm-external-require) for
@@ -182,12 +187,19 @@ What it took to get there, in case you adapt the plugin:
   `@rollup/plugin-commonjs` load its registry as CommonJS before the plugin could serve it
   as ESM.
 - OTel's ESM builds load `forwarded-parse` through a rolldown `createRequire` shim that
-  Rollup can't follow; the plugin rewrites the call into a static import (see "The
-  createRequire shim" above). `optionalRequires`, default `['supports-color']`, lists
-  requires that are meant to fail quietly and stay out of the build warning.
+  Rollup can't follow; this branch prebundles the SDK from the CommonJS builds instead
+  (see "The createRequire shim" above). The plugin still warns about any runtime
+  `require()` left in the output; `optionalRequires`, default `['supports-color']`, lists
+  requires that are meant to fail quietly and stay out of that warning.
 - OTel 3.0 takes `new BatchSpanProcessor({ exporter })`, not the exporter as first argument.
 
 Remaining caveats:
+
+- `otel-sdk-init` has to be built before the app (`dist/` isn't committed); the root
+  `build` and `verify` scripts do that.
+- An app that imports `@opentelemetry/api` itself gets its own copy next to the one inside
+  the prebundle. The API's global registry keeps the two connected, but the code ships
+  twice.
 
 - The plugin depends on two details of import-in-the-middle's internals (how the loader
   computes the registry URL, and the registry's `exports.x = x` lines); it fails the build
