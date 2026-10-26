@@ -1,4 +1,6 @@
-# otel-rollup-toy
+# otel-rollup-toy: Rollup plugin, OTel ESM builds with the shim transform
+
+_One of several approaches, each on its own branch; `main` compares them._
 
 A Rollup plugin and an SDK package that add OpenTelemetry auto-instrumentation to an ESM
 build, plus a toy GitHub JavaScript action that uses them without any OTel code in its source.
@@ -144,8 +146,8 @@ runtime module (as published) and when a file declares one itself.
   top-level import-equals, as in OTel, that's the same moment.
 
 **Alternatives, measured on this toy.** These are single-file bundles of the action without
-the loader-hook files (as on the `main-without-plugin` branch), so the approaches compare
-directly; `main`'s own output is 450 KB in total because it also ships the hook files.
+the loader-hook files (as on the `sdk-esm-shim-transform-no-plugin` branch), so the approaches compare
+directly; this branch's own output is 450 KB in total because it also ships the hook files.
 
 | Approach | Bundle | Runs without `node_modules` |
 | --- | --- | --- |
