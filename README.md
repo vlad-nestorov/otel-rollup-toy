@@ -1,10 +1,12 @@
 # otel-rollup-toy: no Rollup plugin, SDK prebundled as CommonJS
 
-This branch is `main-without-plugin` with `otel-sdk-init` prebundled from OpenTelemetry's
-CommonJS builds, the way `sdk-prebundled-cjs` does it for `main`. The app starts
+_One of several approaches, each on its own branch; `main` compares them._
+
+This branch is `sdk-esm-shim-transform-no-plugin` with `otel-sdk-init` prebundled from OpenTelemetry's
+CommonJS builds, the way `sdk-prebundled-cjs` does it for `sdk-esm-shim-transform`. The app starts
 OpenTelemetry itself with one import, its Rollup config has nothing OTel-specific in it,
 and the output is still one self-contained bundle. The cost is size: 972 KB instead of
-`main-without-plugin`'s 320 KB (see [Size](#size)).
+`sdk-esm-shim-transform-no-plugin`'s 320 KB (see [Size](#size)).
 
 ```
 sdk/   otel-sdk-init: start() sets up the SDK, enables the stock http and undici
@@ -16,7 +18,7 @@ app/   toy action: src/index.js imports src/otel.js first, which calls start();
 
 ## Why the plugin isn't needed
 
-Most of what `main`'s plugin does exists to make import-in-the-middle's loader hooks
+Most of what `sdk-esm-shim-transform`'s plugin does exists to make import-in-the-middle's loader hooks
 work from inside a bundle: the bootstrap that loads the app after the hooks are
 registered, the emitted hook file, the shared registry file, and the rewrite that points
 the loader at it. But when everything is bundled, the only modules a loader hook ever
@@ -43,7 +45,7 @@ export default {
 }
 ```
 
-On `main-without-plugin` it also needs an inline `transform` hook, because one OTel
+On `sdk-esm-shim-transform-no-plugin` it also needs an inline `transform` hook, because one OTel
 dependency doesn't bundle from OTel's ESM builds. `@opentelemetry/instrumentation-http`
 imports the CommonJS package `forwarded-parse` with TypeScript's
 `import forwardedParse = require('forwarded-parse')`, and OTel's build (tsdown, on rolldown)
@@ -77,9 +79,9 @@ ESM build doesn't include at all). Measured in CI, all with the same OTel versio
 
 | Branch | SDK | Rollup plugin | Action output |
 | --- | --- | --- | --- |
-| `main-without-plugin` | ESM builds + inline transform in the app's config | no | 320 KB |
+| `sdk-esm-shim-transform-no-plugin` | ESM builds + inline transform in the app's config | no | 320 KB |
 | this branch | CommonJS prebundle | no | 972 KB |
-| `main` | ESM builds + transform in the plugin | yes | 451 KB |
+| `sdk-esm-shim-transform` | ESM builds + transform in the plugin | yes | 451 KB |
 | `sdk-prebundled-cjs` | CommonJS prebundle | yes | 1,105 KB |
 
 The branches with the plugin also ship import-in-the-middle's loader (128 KB) for its
@@ -90,7 +92,7 @@ The real fix is upstream: OTel could enable rolldown's
 `forwarded-parse`, or use a default import with `esModuleInterop`. Then the ESM builds
 would bundle as is, with no transform and no CommonJS cost.
 
-## Limits compared with main
+## Limits compared with the plugin
 
 - Only builtins are instrumented this way. A library that stays external and loads from
   `node_modules` at runtime would need the loader hooks again (see `option-1-externalize`);
