@@ -1,7 +1,9 @@
 # otel-rollup-toy: option 1, keep dependencies external
 
+_One of several approaches, each on its own branch; `main` compares them._
+
 This branch shows `otel-sdk-init` used without a dedicated Rollup plugin, by keeping the
-instrumented libraries (and the SDK itself) out of the bundle. Compare with `main`,
+instrumented libraries (and the SDK itself) out of the bundle. Compare with `sdk-esm-shim-transform`,
 where `rollup-plugin-otel` makes the same SDK work with everything bundled, and with the
 `option-2-code-transformer` and `option-3-virtual-wrapper` branches.
 
