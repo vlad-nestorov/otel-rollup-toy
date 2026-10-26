@@ -84,7 +84,8 @@ tree-shaken. Measured on this action:
 | ESM builds + this transform | 320 KB | yes |
 | `exportConditions: ['node', 'require']` | 1,018 KB | yes |
 
-Most of the CommonJS build's extra size is `@opentelemetry/semantic-conventions` (285 KB)
+These were measured before the toy used the real `@actions/core` and exported logs; `main`
+has current sizes. Most of the CommonJS build's extra size is `@opentelemetry/semantic-conventions` (285 KB)
 and `sdk-metrics` (145 KB), which the ESM build drops. The real fix is upstream: OTel could
 enable rolldown's
 [`esmExternalRequirePlugin`](https://rolldown.rs/builtin-plugins/esm-external-require) for
@@ -101,6 +102,35 @@ The output is a single `dist/index.js`, so `action.yml` and `output.file` stay a
   the top of a module evaluated first) keeps the unpatched one. Keeping `./otel.js` the
   first import of the entry avoids that for the action's own code.
 
+## GitHub Actions: service name and logs
+
+`start()` takes `service.name` from the action's `otel-service-name` input at runtime,
+then from `OTEL_SERVICE_NAME`, then from its `serviceName` option. `action.yml` declares
+the input without a default, so the fallbacks can apply.
+
+It also exports what the action logs through `@actions/core` as OTLP log records, to
+`/v1/logs` (or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`). `@actions/core` writes every log call
+to stdout, so `sdk/actions.js` watches `process.stdout`:
+
+- plain lines, which is what `core.info()` and `console.log()` write, become INFO records
+- `::debug::`, `::notice::`, `::warning::` and `::error::` (`core.setFailed()` writes the
+  last) become records of that severity, with annotation properties such as `file` and
+  `line` as `actions.annotation.*` attributes
+- other workflow commands (groups, outputs, state) are skipped
+- values registered with `core.setSecret()` are replaced by `***`, as in the runner's log
+
+This works the same however `@actions/core` is bundled, and it catches the calls
+`@actions/core` makes internally, which patching its exports would miss. Two things differ
+from the runner's own log: debug records are exported even when step debug logging is off,
+and a secret the runner masks but the action never registered with `core.setSecret()` (an
+input filled from `secrets.*`, say) is exported as is. `actionsLogs: false` in `start()`'s
+options turns the capture off. OTel's own diagnostics go to stderr, so they're never
+captured.
+
+The toy action uses the real `@actions/core`, and logs an `api-token` input at debug level
+after registering it as a secret, so the checks can confirm that no exported record
+contains it.
+
 ## Run it
 
 ```sh
@@ -111,8 +141,13 @@ npm run verify
 `verify` builds the action, checks the bundle is one file with `start()` ahead of the
 action's code and nothing left to `require()` at runtime, runs it from a temp folder with no `node_modules` against a local fake
 collector, and checks that `http.get` and `fetch` exported spans whose IDs match the
-`traceparent` each request carried. The control build swaps `src/otel.js` for an empty
-module and must export nothing.
+`traceparent` each request carried. It also checks that `core.info()` and `core.debug()`
+were exported as log records, that none contains the `api-token` the action registered as a
+secret, and that spans and records carry `service.name`, taken from the
+`otel-service-name` input in a second run. The control build swaps `src/otel.js` for an
+empty module and must export nothing.
 
 CI (`.github/workflows/verify.yml`) runs `verify`, and also runs `uses: ./app` with every
 `node_modules` deleted, so the GitHub runner launches the bundle on its own Node 24.
+That run passes the `otel-service-name` and `api-token` inputs, plus an
+`OTEL_SERVICE_NAME` the input has to override.
