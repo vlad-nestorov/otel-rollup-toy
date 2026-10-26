@@ -12,8 +12,12 @@ const backend = await startFakeBackend({
   onChange: () =>
     writeFileSync(
       stateFile,
-      JSON.stringify({ spans: backend.spans, requests: backend.requests, exports: backend.exports }, null, 2),
+      JSON.stringify(
+        { spans: backend.spans, logs: backend.logs, requests: backend.requests, exports: backend.exports },
+        null,
+        2,
+      ),
     ),
 })
-writeFileSync(stateFile, JSON.stringify({ spans: [], requests: [], exports: [] }))
+writeFileSync(stateFile, JSON.stringify({ spans: [], logs: [], requests: [], exports: [] }))
 console.log(`fake backend listening on ${backend.url}`)
