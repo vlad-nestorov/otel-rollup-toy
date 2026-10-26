@@ -14,7 +14,7 @@ async function run() {
     const token = getInput('api-token')
     if (token) {
       setSecret(token)
-      debug(`Authorization: Bearer ${token}`)
+      debug(`api-token: ${token}`)
     }
     const viaHttp = await get(`${target}/via-http`)
     const viaFetch = (await fetch(`${target}/via-fetch`)).status
