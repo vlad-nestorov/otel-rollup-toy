@@ -131,9 +131,11 @@ try {
   await Promise.all(tempDirs.map((d) => rm(d, { recursive: true, force: true })))
 }
 
-// Last, so it stays in view: CI annotations keep only the tail of this output.
+// GitHub cuts long annotation messages short, so in CI the sizes get their own notice.
 const withOtel = await jsKB(path.join(appDir, 'dist')).catch(() => '?')
 const withoutOtel = await jsKB(path.join(appDir, 'dist-control')).catch(() => '?')
-console.log(`\nJavaScript output: ${withOtel} KB with OpenTelemetry, ${withoutOtel} KB without`)
+const sizeLine = `JavaScript output: ${withOtel} KB with OpenTelemetry, ${withoutOtel} KB without`
+console.log(`\n${sizeLine}`)
+if (process.env.GITHUB_ACTIONS === 'true') console.log(`::notice title=size::${sizeLine}`)
 console.log(failures() === 0 ? '\nAll checks passed.' : `\n${failures()} check(s) failed.`)
 process.exitCode = failures() === 0 ? 0 : 1
