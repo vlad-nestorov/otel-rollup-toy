@@ -1,8 +1,10 @@
 # otel-rollup-toy: option 2, build-time code transformer
 
+_One of several approaches, each on its own branch; `main` compares them._
+
 This branch shows `otel-sdk-init` used without a dedicated Rollup plugin, by rewriting
 the instrumented library's source at build time with the off-the-shelf
-`@apm-js-collab/code-transformer-bundler-plugins` (orchestrion). Compare with `main`,
+`@apm-js-collab/code-transformer-bundler-plugins` (orchestrion). Compare with `sdk-esm-shim-transform`,
 where `rollup-plugin-otel` makes the patch-based SDK work bundled, and with the
 `option-1-externalize` and `option-3-virtual-wrapper` branches.
 
