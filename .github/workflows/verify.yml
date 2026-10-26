@@ -30,7 +30,7 @@ jobs:
       - run: .github/scripts/annotate.sh 'npm run build' npm run build
 
       - name: Remove node_modules so the action can only use what's in dist/
-        run: rm -rf node_modules app/node_modules plugin/node_modules
+        run: rm -rf node_modules app/node_modules plugin/node_modules sdk/node_modules
 
       - name: Start the fake collector and target
         run: |

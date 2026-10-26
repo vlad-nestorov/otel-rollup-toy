@@ -3,8 +3,17 @@
   "version": "0.1.0",
   "description": "Starts OpenTelemetry tracing for a Node app or GitHub action: loader hooks, SDK, instrumentations, flush on exit",
   "type": "module",
-  "exports": "./index.js",
+  "exports": "./dist/index.cjs",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "rollup -c"
+  },
   "dependencies": {
+    "import-in-the-middle": "^3.5.0"
+  },
+  "devDependencies": {
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/context-async-hooks": "^3.0.0",
     "@opentelemetry/core": "^3.0.0",
@@ -14,6 +23,8 @@
     "@opentelemetry/instrumentation-undici": "^0.34.0",
     "@opentelemetry/resources": "^3.0.0",
     "@opentelemetry/sdk-trace": "^3.0.0",
-    "import-in-the-middle": "^3.5.0"
+    "@rollup/plugin-commonjs": "^29.0.3",
+    "@rollup/plugin-node-resolve": "^16.0.3",
+    "rollup": "^4.65.0"
   }
 }

@@ -1,7 +1,7 @@
 {
   "name": "rollup-plugin-otel",
   "version": "0.1.0",
-  "description": "Rollup side of adding OpenTelemetry to an ESM build: entry bootstrap, import-in-the-middle runtime files, CommonJS shim bundling",
+  "description": "Rollup side of adding OpenTelemetry to an ESM build: entry bootstrap and import-in-the-middle runtime files",
   "type": "module",
   "exports": "./index.js",
   "peerDependencies": {

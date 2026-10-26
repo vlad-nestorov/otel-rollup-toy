@@ -86,8 +86,8 @@ try {
   const entry = await readFile(path.join(dist, 'index.js'), 'utf8')
   check('entry loads the app with a dynamic import()', /\bimport\(/.test(entry))
   check('app code is not in the entry chunk', !entry.includes('via-http'))
-  // OTel's ESM builds load forwarded-parse through a createRequire shim, which the plugin
-  // rewrites into a static import (see "The createRequire shim" in the README).
+  // OTel's ESM builds load forwarded-parse through a createRequire shim; otel-sdk-init is
+  // prebundled from the CommonJS builds to avoid it (see "The createRequire shim" in the README).
   const leftovers = await runtimeRequiresIn(dist)
   check('no non-builtin module left to require() at runtime', leftovers.length === 0, leftovers.join(', '))
 

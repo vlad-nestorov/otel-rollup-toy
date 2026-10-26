@@ -6,9 +6,10 @@
 //      the URL of the loader-hook file this plugin emits,
 //   2. loads the real entry with a dynamic import(), so the app's module graph is
 //      resolved only after the hooks exist (the same effect as `node --import`).
-// Everything about what gets instrumented and where spans go lives in the SDK package.
-// This plugin only deals with bundling: the entry swap, the files import-in-the-middle
-// needs at runtime, CommonJS require shims, and output options.
+// Everything about what gets instrumented and where spans go lives in the SDK package,
+// which ships prebundled with its OpenTelemetry dependencies. This plugin only deals with
+// bundling: the entry swap, the files import-in-the-middle needs at runtime, and output
+// options.
 
 import { realpathSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
@@ -56,18 +57,17 @@ export default function otel(options = {}) {
       try {
         sdkFile = realpathSync(requireFromProject.resolve(sdk))
       } catch {
-        this.error(`[otel] could not resolve the SDK package "${sdk}" from ${process.cwd()}; is it installed?`)
+        this.error(`[otel] could not resolve the SDK package "${sdk}" from ${process.cwd()}; is it installed and built?`)
       }
 
-      // import-in-the-middle must be the copy the SDK's @opentelemetry/instrumentation
-      // uses: the loader's wrappers report to its lib/register.js, which is where the
-      // instrumentations' Hook() registrations live.
+      // import-in-the-middle must be the copy the SDK bundle requires: the loader's
+      // wrappers report to its lib/register.js, which is where the instrumentations'
+      // Hook() registrations live.
       let iitmDir
       try {
-        const requireFromInstrumentation = createRequire(createRequire(sdkFile).resolve('@opentelemetry/instrumentation'))
-        iitmDir = path.dirname(requireFromInstrumentation.resolve('import-in-the-middle/package.json'))
+        iitmDir = path.dirname(createRequire(sdkFile).resolve('import-in-the-middle/package.json'))
       } catch {
-        this.error(`[otel] could not find import-in-the-middle through ${sdk}'s @opentelemetry/instrumentation`)
+        this.error(`[otel] could not find import-in-the-middle from ${sdk} (${sdkFile})`)
       }
       const iitm = (file) => realpathSync(path.join(iitmDir, file))
 
@@ -136,27 +136,14 @@ export default function otel(options = {}) {
     transform: {
       order: 'pre',
       handler(code, id) {
-        if (ids !== undefined && id === ids.iitmCreateHook) {
-          // The loader computes the registry URL relative to its own file. Point it
-          // at the emitted registry chunk, wherever that ends up.
-          const needle = "new URL('lib/register.js', meta.url).toString()"
-          if (!code.includes(needle)) {
-            this.error('[otel] unsupported import-in-the-middle version: registry URL not found in create-hook.mjs')
-          }
-          return { code: code.replace(needle, `import.meta.ROLLUP_FILE_URL_${registerRef}`), map: null }
+        if (ids === undefined || id !== ids.iitmCreateHook) return null
+        // The loader computes the registry URL relative to its own file. Point it at
+        // the emitted registry chunk, wherever that ends up.
+        const needle = "new URL('lib/register.js', meta.url).toString()"
+        if (!code.includes(needle)) {
+          this.error('[otel] unsupported import-in-the-middle version: registry URL not found in create-hook.mjs')
         }
-
-        if (id.includes('/@opentelemetry/') && id.includes('/platform/browser/')) {
-          this.warn(
-            `[otel] bundled the browser build of ${id}. ` +
-              'Add exportConditions: ["node"] to nodeResolve() or instrumentation will be a no-op.',
-          )
-        }
-
-        // Bundle CommonJS dependencies that ESM builds load through a createRequire shim.
-        // See "CommonJS dependencies loaded through a createRequire shim" below.
-        if (id.includes('/node_modules/')) return inlineCreateRequireCalls(code)
-        return null
+        return { code: code.replace(needle, `import.meta.ROLLUP_FILE_URL_${registerRef}`), map: null }
       },
     },
 
@@ -179,8 +166,8 @@ export default function otel(options = {}) {
 
     generateBundle(_, bundle) {
       // Anything still loaded with a runtime require() isn't in the output, and an
-      // action has no node_modules to find it in. This catches shim calls the transform
-      // couldn't rewrite (computed specifiers) and plain requires left by commonjs().
+      // action has no node_modules to find it in: requires commonjs() left in place, or
+      // calls through a createRequire shim from a dependency's ESM build.
       const leftover = new Set()
       for (const file of Object.values(bundle)) {
         if (file.type !== 'chunk') continue
@@ -214,138 +201,23 @@ export default function otel(options = {}) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// CommonJS dependencies loaded through a createRequire shim
-// ---------------------------------------------------------------------------
-//
-// Where the shim comes from
-//   Some OTel packages import CommonJS modules with TypeScript's import-equals syntax.
-//   @opentelemetry/instrumentation-http's src/utils.ts has:
-//
-//     import forwardedParse = require('forwarded-parse');
-//
-//   OTel builds with tsdown, which uses rolldown. For a dependency it doesn't bundle,
-//   rolldown keeps require() semantics in Node ESM output, rather than turning the call
-//   into an import, by building a real require with createRequire. So the published
-//   ESM build (0.300.0) has:
-//
-//     // dist/_virtual/_rolldown/runtime.mjs
-//     import { createRequire } from "node:module";
-//     var __require = /* #__PURE__ */ (() => createRequire(import.meta.url))();
-//     export { __require };
-//
-//     // dist/utils.mjs
-//     import { __require } from "./_virtual/_rolldown/runtime.mjs";
-//     const forwardedParse = __require("forwarded-parse");
-//
-//   The CommonJS build, dist/utils.cjs, has a plain require("forwarded-parse").
-//
-// Why Rollup doesn't bundle it
-//   @rollup/plugin-commonjs only rewrites the free `require` of CommonJS modules. In the
-//   ESM file, __require is an ordinary function imported from another module, so the
-//   call stays in the output as is and forwarded-parse never makes it into the bundle.
-//
-// What goes wrong at runtime
-//   After bundling, import.meta.url is the bundle's own URL, so the call resolves
-//   forwarded-parse starting from dist/. Inside a repo it finds the repo's node_modules
-//   and works by accident; deployed without node_modules it throws "Cannot find module".
-//
-// The fix
-//   In files under node_modules, every call through such a shim whose argument is a
-//   string literal naming a non-builtin module becomes a static import, which Rollup
-//   resolves and bundles like any other:
-//
-//     import * as __otel_cjs_0 from "forwarded-parse";
-//     const __otel_interop = (m) => (m && m.default !== undefined ? m.default : m);
-//     const forwardedParse = __otel_interop(__otel_cjs_0);
-//
-//   @rollup/plugin-commonjs exposes a CommonJS module's module.exports as its default
-//   export, and __otel_interop returns that: the value require() would have returned.
-//   The shim is then unused, so Rollup drops it.
-//
-// Limits
-//   - Only string-literal specifiers. A computed __require(name) can't be resolved at
-//     build time; generateBundle warns about any runtime require left in the output.
-//   - Builtins (node:http, fs, ...) keep the runtime call: Node always has them.
-//   - Assumes the required module is CommonJS. require() of an ES module returns its
-//     namespace, whereas the interop returns its default export when it has one.
-//   - The import runs when the importing module is evaluated rather than at the call.
-//     For a top-level import-equals, as in OTel, that is the same moment.
-//
-// The alternative without a transform is nodeResolve({ exportConditions: ['node',
-// 'require'] }), which picks OTel's CommonJS builds. CommonJS can't be tree-shaken,
-// though: the toy action's bundle grows from about 312 KB to about 1,018 KB, mostly
-// @opentelemetry/semantic-conventions and sdk-metrics that the ESM build drops.
+// Specifiers of non-builtin modules a bundle chunk still loads at runtime: a plain
+// require("x"), or a call through rolldown's createRequire shim, __require("x"). Used
+// for the build warning.
+const RUNTIME_REQUIRE = /(?<![\w$.])(?:require|__require[\w$]*)\(\s*(["'])([^"']+)\1\s*\)/g
 
-// A local binding initialized with createRequire(import.meta.url), in any form,
-// including rolldown's `var __require = (() => createRequire(import.meta.url))()`.
-const SHIM_DECLARATION = /(?:var|let|const)\s+([\w$]+)\s*=[^;]*?createRequire\(\s*import\.meta\.url\s*\)/g
-// rolldown's usual layout: the shim lives in a shared runtime module and is imported,
-// possibly renamed: import { __require } from "./_virtual/_rolldown/runtime.mjs"
-const NAMED_IMPORT = /import\s*\{([^}]*)\}\s*from\s*["']([^"']+)["']/g
-
-// The local names that refer to a createRequire shim in this module.
-function shimNames(code) {
-  const names = [...code.matchAll(SHIM_DECLARATION)].map((m) => m[1])
-  for (const [, specifiers, source] of code.matchAll(NAMED_IMPORT)) {
-    if (!source.includes('rolldown/runtime')) continue
-    for (const specifier of specifiers.split(',')) {
-      const m = /^\s*__require(?:\s+as\s+([\w$]+))?\s*$/.exec(specifier)
-      if (m) names.push(m[1] ?? '__require')
-    }
-  }
-  return names
-}
-
-// Matches `name("specifier")` with a string literal, not `obj.name(...)` or `xname(...)`.
-function literalCalls(name) {
-  return new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}\\(\\s*(["'])([^"']+)\\1\\s*\\)`, 'g')
-}
-
-function isBuiltin(specifier) {
-  return specifier.startsWith('node:') || builtinModules.includes(specifier.split('/')[0])
-}
-
-// The transform described above. Returns null when the module has nothing to rewrite.
-function inlineCreateRequireCalls(code) {
-  const names = shimNames(code)
-  if (names.length === 0) return null
-
-  const imports = new Map() // specifier -> local namespace binding
-  let changed = code
-  for (const name of names) {
-    changed = changed.replace(literalCalls(name), (whole, _quote, specifier) => {
-      if (isBuiltin(specifier)) return whole
-      if (!imports.has(specifier)) imports.set(specifier, `__otel_cjs_${imports.size}`)
-      return `__otel_interop(${imports.get(specifier)})`
-    })
-  }
-  if (imports.size === 0) return null
-
-  const header = [
-    ...[...imports].map(([specifier, local]) => `import * as ${local} from ${JSON.stringify(specifier)};`),
-    'const __otel_interop = (m) => (m && m.default !== undefined ? m.default : m);',
-  ].join('\n')
-  // Imports are hoisted anyway; the header only has to come after a hashbang line.
-  if (changed.startsWith('#!')) {
-    const firstLineEnd = changed.indexOf('\n') + 1
-    return { code: `${changed.slice(0, firstLineEnd)}${header}\n${changed.slice(firstLineEnd)}`, map: null }
-  }
-  return { code: `${header}\n${changed}`, map: null }
-}
-
-// Specifiers of non-builtin modules a bundle chunk still loads with a runtime require,
-// through a plain `require` or a createRequire shim. Used for the build warning.
 function runtimeRequires(chunkCode) {
   const found = new Set()
   // Crude comment stripping: good enough for a warning, avoids flagging examples in docs.
   const code = chunkCode.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
-  for (const name of new Set(['require', '__require', ...shimNames(code)])) {
-    for (const m of code.matchAll(literalCalls(name))) {
-      if (!isBuiltin(m[2]) && !m[2].startsWith('.')) found.add(m[2])
-    }
+  for (const [, , specifier] of code.matchAll(RUNTIME_REQUIRE)) {
+    if (!isBuiltin(specifier) && !specifier.startsWith('.')) found.add(specifier)
   }
   return found
+}
+
+function isBuiltin(specifier) {
+  return specifier.startsWith('node:') || builtinModules.includes(specifier.split('/')[0])
 }
 
 // import-in-the-middle's lib/register.js is CommonJS. Its generated wrappers import

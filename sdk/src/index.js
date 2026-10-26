@@ -4,6 +4,9 @@
 // any bundler: whatever loads it before the app (rollup-plugin-otel, or node --import)
 // only has to call start() first and, for Node versions without in-thread module hooks,
 // pass hookUrl, the URL of a file exporting import-in-the-middle's loader hooks.
+//
+// The package ships this file prebundled with its OpenTelemetry dependencies as
+// dist/index.cjs (see rollup.config.js); only import-in-the-middle stays external.
 
 import { register as registerAsyncHooks } from 'node:module'
 import { context, diag, DiagConsoleLogger, DiagLogLevel, propagation, trace } from '@opentelemetry/api'
