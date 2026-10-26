@@ -1,8 +1,10 @@
-# otel-rollup-toy: main without the Rollup plugin
+# otel-rollup-toy: no Rollup plugin, OTel ESM builds with the shim transform
 
-This branch is `main` without the `rollup-plugin-otel` package. The app starts
+_One of several approaches, each on its own branch; `main` compares them._
+
+This branch is `sdk-esm-shim-transform` without the `rollup-plugin-otel` package. The app starts
 OpenTelemetry itself with one import, the output is still one self-contained bundle, and
-the spans come from the same stock OTel instrumentations. Compare with `main` and with the `option-1-externalize`,
+the spans come from the same stock OTel instrumentations. Compare with `sdk-esm-shim-transform` and with the `option-1-externalize`,
 `option-2-code-transformer` and `option-3-virtual-wrapper` branches.
 
 ```
@@ -13,7 +15,7 @@ app/   toy action: src/index.js imports src/otel.js first, which calls start()
 
 ## Why the plugin isn't needed
 
-Most of what `main`'s plugin does exists to make import-in-the-middle's loader hooks
+Most of what `sdk-esm-shim-transform`'s plugin does exists to make import-in-the-middle's loader hooks
 work from inside a bundle: the bootstrap that loads the app after the hooks are
 registered, the emitted hook file, the shared registry file, and the rewrite that points
 the loader at it. But when everything is bundled, the only modules a loader hook ever
@@ -31,7 +33,7 @@ evaluate in order, so the SDK starts before any other module of the action runs.
 ## What's left in the build config
 
 `app/rollup.config.js` has one OTel-specific piece: an inline `transform` hook,
-`bundleRequireShims`, documented at the top of the file. It's the same fix `main`'s plugin
+`bundleRequireShims`, documented at the top of the file. It's the same fix `sdk-esm-shim-transform`'s plugin
 applies.
 
 **The problem it solves.** `@opentelemetry/instrumentation-http` imports the CommonJS
@@ -90,7 +92,7 @@ enable rolldown's
 
 The output is a single `dist/index.js`, so `action.yml` and `output.file` stay as they were.
 
-## Limits compared with main
+## Limits compared with the plugin
 
 - Only builtins are instrumented this way. A library that stays external and loads from
   `node_modules` at runtime would need the loader hooks again (see `option-1-externalize`);
