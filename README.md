@@ -10,12 +10,39 @@ branch only compares them.
 
 ## What every branch checks
 
-Every branch builds the same toy action, which calls `http.get` and `fetch` (the option
-branches also use `dataloader`). `npm run verify` builds it, runs it from a folder with no
-`node_modules` against a fake OTLP collector, and checks that each call exported a span and
-that the `traceparent` header each request carried points at that span. A build without
-OpenTelemetry must export nothing. CI runs `verify` and also runs the built action with
-`uses:`, so the GitHub runner launches it on its own Node 24. Both jobs pass on every branch.
+Every branch builds the same toy action, which uses `@actions/core` and calls `http.get`
+and `fetch` (the option branches also use `dataloader`). `npm run verify` builds it, runs it
+from a folder with no `node_modules` against a fake OTLP collector, and checks that:
+
+- each call exported a span, and the `traceparent` header each request carried points at it
+- what the action logged through `@actions/core` arrived as log records, with the
+  `api-token` input it registered as a secret masked
+- spans and log records carry `service.name`, taken from the `otel-service-name` input when
+  it's set
+- a build without OpenTelemetry exports nothing
+
+CI runs `verify` and also runs the built action with `uses:`, passing both inputs, so the
+GitHub runner launches it on its own Node 24. Both jobs pass on every branch.
+
+## Service name and logs, the same on every branch
+
+Each branch's SDK has the same `actions.js` module for these, so they don't bear on the
+choice between approaches:
+
+- **Service name:** `start()` reads the `otel-service-name` action input at runtime, then
+  `OTEL_SERVICE_NAME`, then its `serviceName` option. `action.yml` declares the input
+  without a default, so the fallbacks can apply.
+- **Logs:** `@actions/core` writes every log call to stdout, so `start()` watches
+  `process.stdout` and exports OTLP log records: plain lines (`core.info()`,
+  `console.log()`) at INFO, and `::debug::`, `::notice::`, `::warning::` and `::error::`
+  (also from `core.setFailed()`) at their own severity, with annotation properties as
+  attributes. Other workflow commands are skipped, and values registered with
+  `core.setSecret()` are masked. This covers `@actions/core` however it's bundled,
+  including its internal calls, which patching its exports would miss.
+
+Two caveats: debug records are exported even when step debug logging is off, and a secret
+the runner masks but the action never registered with `core.setSecret()` (an input filled
+from `secrets.*`, say) is exported as is.
 
 ## Instrumenting Node's builtins
 
@@ -24,11 +51,13 @@ past one OpenTelemetry dependency that doesn't bundle from OTel's ESM builds.
 
 | | With `rollup-plugin-otel` | Without a plugin |
 | --- | --- | --- |
-| **OTel ESM builds + shim transform** | [`sdk-esm-shim-transform`][esm-plugin]: 451 KB | [`sdk-esm-shim-transform-no-plugin`][esm-no-plugin]: 320 KB |
-| **SDK prebundled from OTel's CommonJS builds** | [`sdk-prebundled-cjs`][cjs-plugin]: 1,105 KB | [`sdk-prebundled-cjs-no-plugin`][cjs-no-plugin]: 972 KB |
+| **OTel ESM builds + shim transform** | [`sdk-esm-shim-transform`][esm-plugin]: 492 KB | [`sdk-esm-shim-transform-no-plugin`][esm-no-plugin]: 360 KB |
+| **SDK prebundled from OTel's CommonJS builds** | [`sdk-prebundled-cjs`][cjs-plugin]: 1,159 KB | [`sdk-prebundled-cjs-no-plugin`][cjs-no-plugin]: 1,026 KB |
 
-Sizes are the action's total JavaScript output, measured in CI with OpenTelemetry JS 3.0
-and Rollup 4.
+Sizes are OpenTelemetry's share of the action's JavaScript output: the output minus the same
+action built without OpenTelemetry, which is 966 KB, nearly all of it `@actions/core` and
+what it pulls in. Measured in CI with OpenTelemetry JS 3.0 and Rollup 4. Exporting logs
+accounts for about 40 KB of each with the ESM builds and 55 KB with the CommonJS prebundle.
 
 ### With or without the plugin
 
@@ -68,8 +97,8 @@ TypeScript's `import x = require()`. OTel's ESM build keeps that a runtime call 
   transform anywhere; without the plugin, the app's config is just `nodeResolve()` and
   `commonjs()`. But CommonJS can't be tree-shaken: the prebundle carries all of
   `@opentelemetry/semantic-conventions` (285 KB, against 16 KB from the ESM build) and
-  `sdk-metrics` (about 130 KB, which the ESM build leaves out entirely), so the output
-  roughly triples.
+  `sdk-metrics` (about 130 KB, which the ESM build leaves out entirely), so OpenTelemetry's
+  share of the output grows two- to threefold.
 
 Neither would be needed if OTel's build bundled `forwarded-parse` differently, for example
 with rolldown's
@@ -88,15 +117,16 @@ an earlier version of the toy and each uses its own variant of the SDK.
 | [`option-3-virtual-wrapper`][option-3] | Inline Rollup hooks route `import 'dataloader'` through a generated module that runs the stock instrumentation's `patch()` on its exports | no | used, for CommonJS libraries whose API is `module.exports` |
 
 Options 2 and 3 take `http.get` spans from Node's own http client diagnostics channels
-instead of OTel's http instrumentation. Their sizes aren't comparable with the table above,
-since the app has an extra dependency and the SDKs differ.
+instead of OTel's http instrumentation. OpenTelemetry's share of their output is 308 KB
+(option 2) and 321 KB (option 3); option 1 bundles almost nothing and ships `node_modules`
+instead. That isn't directly comparable with the table above, since the SDKs differ.
 
 ## In short
 
-- Smallest output: `sdk-esm-shim-transform-no-plugin` (320 KB, one file), at the cost of a
-  transform in the app's Rollup config.
+- Smallest output: `sdk-esm-shim-transform-no-plugin` (360 KB of OpenTelemetry, one file),
+  at the cost of a transform in the app's Rollup config.
 - Simplest build: `sdk-prebundled-cjs-no-plugin`, a stock Rollup config, at about three
-  times the size.
+  times as much OpenTelemetry code.
 - No OpenTelemetry code in the app's source: the plugin branches. In a fully bundled action
   their loader hooks only ever see builtins, so the extra loader and files buy convenience
   rather than coverage.
