@@ -46,9 +46,13 @@ jobs:
         uses: ./deployed-action
         with:
           target-url: http://127.0.0.1:4318
+          api-token: ci-s3cret-token
+          otel-service-name: toy-action-ci
         env:
           OTEL_EXPORTER_OTLP_ENDPOINT: http://127.0.0.1:4318
           OTEL_ROLLUP_DEBUG: '1'
+          # The otel-service-name input takes precedence over this.
+          OTEL_SERVICE_NAME: not-this-one
 
       - name: If the action failed, rerun the build with plain node to capture its output
         if: failure()
@@ -60,7 +64,7 @@ jobs:
           node deployed-action/dist/index.js
 
       - name: Check what the collector received
-        run: .github/scripts/annotate.sh 'check-backend' node app/scripts/check-backend.mjs "$RUNNER_TEMP/backend.json"
+        run: .github/scripts/annotate.sh 'check-backend' node app/scripts/check-backend.mjs "$RUNNER_TEMP/backend.json" toy-action-ci ci-s3cret-token
 
       - name: Upload the build and backend state
         if: always()
