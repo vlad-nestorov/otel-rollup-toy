@@ -1,9 +1,0 @@
-name: toy-action
-description: Toy JavaScript action instrumented by rollup-plugin-otel
-inputs:
-  target-url:
-    description: Base URL the action calls with node:http and fetch
-    required: true
-runs:
-  using: node24
-  main: dist/index.js
