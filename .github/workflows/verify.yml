@@ -18,4 +18,5 @@ jobs:
       - run: git fetch --depth=1 origin main && git worktree add "$RUNNER_TEMP/main" FETCH_HEAD
       - run: npm install --no-audit --no-fund
         working-directory: ${{ runner.temp }}/main
-      - run: .github/scripts/annotate.sh 'size: main vs branch' .github/scripts/size-compare.sh
+      - run: >-
+          .github/scripts/annotate.sh 'size: main vs branch' .github/scripts/size-compare.sh
